@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: agentnet-postgres
+    environment:
+      POSTGRES_USER: agentnet
+      POSTGRES_PASSWORD: agentnet
+      POSTGRES_DB: agentnet
+    ports:
+      - "5432:5432"
+    volumes:
+      - agentnet_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentnet -d agentnet"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  agentnet_pg: {}
