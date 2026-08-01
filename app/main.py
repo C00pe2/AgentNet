@@ -14,7 +14,7 @@ from app.api import chat as chat_api
 from app.api import health_admin as health_api
 from app.api import metrics as metrics_api
 from app.api import sessions as sessions_api
-from app.config import get_settings
+from app.config import get_settings, log_effective_llm_config
 from app.core.codes import ErrorCode, GatewayError
 from app.core.request_id import RequestIdContext, new_request_id
 from app.db.session import dispose_engine, init_engine
@@ -32,6 +32,7 @@ logger = logging.getLogger("agentnet")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    log_effective_llm_config()
     # 测试时可以跳过 lifespan (AGENTNET_SKIP_LIFESPAN=1)
     import os
     if os.environ.get("AGENTNET_SKIP_LIFESPAN") == "1":
@@ -65,7 +66,7 @@ async def lifespan(app: FastAPI):
         logger.info("AgentNet Gateway 关闭完成")
 
 
-def _orjson_response(payload: dict, status_code: int = 200) -> Response:
+def _json_response(payload: dict, status_code: int = 200) -> Response:
     """用 ensure_ascii=False 的 JSONResponse，兼容中文。"""
     return JSONResponse(
         payload,
@@ -115,7 +116,7 @@ async def gateway_error_handler(request: Request, exc: GatewayError) -> Response
     from app.schemas.response import error_envelope
 
     body = error_envelope(exc.code, exc.message, data=exc.data).model_dump()
-    return _orjson_response(body, status_code=exc.http_status)
+    return _json_response(body, status_code=exc.http_status)
 
 
 @app.exception_handler(RequestValidationError)
@@ -126,7 +127,7 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
         ErrorCode.BAD_REQUEST,
         f"请求参数错误: {exc.errors()[0]['msg'] if exc.errors() else 'invalid'}",
     ).model_dump()
-    return _orjson_response(body, status_code=400)
+    return _json_response(body, status_code=400)
 
 
 @app.exception_handler(StarletteHTTPException)
@@ -142,7 +143,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException) 
     if exc.status_code in (401, 403):
         code = ErrorCode.BAD_REQUEST
     body = error_envelope(code, str(exc.detail) if exc.detail else "Bad Request").model_dump()
-    return _orjson_response(body, status_code=exc.status_code)
+    return _json_response(body, status_code=exc.status_code)
 
 
 @app.exception_handler(Exception)
@@ -154,7 +155,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> Respo
         ErrorCode.PLAN_ORCHESTRATION_FAILED,
         f"网关内部异常: {type(exc).__name__}: {str(exc)[:200]}",
     ).model_dump()
-    return _orjson_response(body, status_code=500)
+    return _json_response(body, status_code=500)
 
 
 # 路由注册

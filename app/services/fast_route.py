@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Sequence
 
 from app.db.models import Agent
@@ -16,16 +15,15 @@ from app.llm.client import LLMClient
 logger = logging.getLogger(__name__)
 
 
-_FAST_ROUTE_PROMPT_TPL = """你是一个高并发的请求分发器。请阅读以下可用的专家Agent列表及核心能力：
+_FAST_ROUTE_PROMPT_TPL = """你是一个高并发的请求分发器 (1-shot 分类)。阅读以下可用的专家 Agent 列表:
 {SHORT_AGENT_LIST_JSON}
 
-请分析用户的输入，并在下面的选项中做出单选，你【必须且只能】从选项中挑选一个作为输出，不要包含任何解释或标点符号：
-1. 如果用户意图非常单一，且现有某个专家Agent能够【完美独立搞定】，请直接输出该Agent的 "agent_id"。
-2. 如果用户意图复杂、需要多步拆解、或者需要多个专家Agent协同，请直接输出 "COMPLEX"。
-3. 如果所有专家Agent都不匹配，请直接输出 "UNKNOWN"。
-"""
+【硬约束】只允许输出一个 token / 短语, 不要任何解释、标点、换行:
+- 如果单个 Agent 能完美独立搞定, 输出该 agent 的 agent_id
+- 如果需要多步拆解 / 多 Agent 协同, 输出: COMPLEX
+- 如果所有 Agent 都不匹配, 输出: UNKNOWN
 
-_AGENT_ID_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,100}$")
+不要写句子, 不要解释, 不要带引号。直接给最终答案。"""
 
 
 def _build_short_list(agents: Sequence[Agent]) -> str:
@@ -85,7 +83,5 @@ def _normalize(raw: str, *, valid_ids: set[str]) -> str:
     if upper == "UNKNOWN":
         return "UNKNOWN"
     if raw in valid_ids:
-        return raw
-    if _AGENT_ID_RE.match(raw) and raw in valid_ids:
         return raw
     return "COMPLEX"

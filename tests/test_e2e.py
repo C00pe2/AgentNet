@@ -191,18 +191,12 @@ async def patched_app(agents: list[Agent], session: AgentSession | None):
     async def fake_mark_requested(self_or_agent_id=None, agent_id=None):
         pass
 
-    async def fake_fire_and_forget_record(*args, **kwargs):
-        pass
-
     chat_api._create_plan = fake_create_plan
     chat_api._update_plan_graph = fake_update_plan_graph
     chat_api._finalize_plan = fake_finalize_plan
-    chat_api._mark_requested = fake_mark_requested
-    chat_api.fire_and_forget = fake_fire_and_forget_record
 
     # monkey-patch Dispatcher 类方法（接受 self）
     Dispatcher._finalize_plan = fake_finalize_plan
-    Dispatcher._mark_requested = fake_mark_requested
 
     # 同时 module-level helpers（dispatcher.py 内的 free function）
     dispatcher_mod._mark_requested = fake_mark_requested

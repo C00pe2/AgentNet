@@ -4,7 +4,6 @@ from .call_log_service import CallLogService
 from .expert_client import ExpertAgentClient
 from .health_service import HealthService
 from .metrics_service import MetricsService
-from .plan_service import PlanService
 from .session_service import SessionService
 
 __all__ = [
@@ -13,6 +12,5 @@ __all__ = [
     "ExpertAgentClient",
     "HealthService",
     "MetricsService",
-    "PlanService",
     "SessionService",
 ]

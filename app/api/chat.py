@@ -1,23 +1,20 @@
-"""/chat 主入口：fast_route → 单步直跳 or deep_plan → dispatcher。
+"""/chat 主入口：fast_route → 单步 or deep_plan → 统一 Dispatcher 执行。
 
-SPEC §3 全链路。
+SPEC §3 全链路。单步直跳与 DAG 编排共享同一 Dispatcher，
+保证限流 / 熔断 / 审计 / 错误归一行为完全一致。
 """
 from __future__ import annotations
 
 import logging
-import time
 from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.core.circuit_breaker import on_failure as cb_on_failure
-from app.core.circuit_breaker import on_success as cb_on_success
-from app.core.circuit_breaker import pre_call as cb_pre_call
-from app.core.codes import ErrorCode, GatewayError, downstream_to_gateway_code
-from app.core.ratelimit import get_rate_limiter
-from app.db.models import Agent, AgentSession, PlanExecution
+from app.core.codes import ErrorCode
+from app.core.token_clip import clip_text_to_token_budget
+from app.db.models import PlanExecution
 from app.db.session import get_sessionmaker
 from app.deps import get_agent_service, get_session_service
 from app.llm.client import get_llm_client
@@ -48,12 +45,13 @@ async def chat(
 ) -> dict[str, Any]:
     """主入口。
 
-    1) 查询 session -> 必须存在，否则 400
+    1) 查询 session -> 必须存在，否则 404
     2) 拉取 active agents -> 若空，404 NO_AGENT_MATCHED
     3) 一层 fast_route
-       - agent_id: 直跳下游 -> 写 call_log
-       - COMPLEX/UNKNOWN: 进二层 deep_plan + Dispatcher
-    4) 把所有错误归一到网关错误码 -> Envelope
+       - agent_id: 构造单 step 计划
+       - COMPLEX: 二层 deep_plan 产出 DAG steps
+       - UNKNOWN: 404 NO_AGENT_MATCHED
+    4) 统一交给 Dispatcher 执行
     """
     session = await session_svc.get(payload.session_id)
     if session is None:
@@ -82,7 +80,7 @@ async def chat(
     agents_by_id = {a.agent_id: a for a in active_agents}
 
     if decision in agents_by_id:
-        # 单步直跳
+        # 单步直跳：构造单 step 计划，与 DAG 共用 Dispatcher 全链路
         plan_row = await _create_plan(
             session_id=payload.session_id,
             raw_query=payload.query,
@@ -91,26 +89,20 @@ async def chat(
                 "decision": decision,
             },
         )
-        result = await _dispatch_single(
-            agent=agents_by_id[decision],
-            query=payload.query,
-            session=session,
-            plan_id=plan_row.plan_id,
-            session_id=payload.session_id,
-        )
-        if result["status"] == "SUCCESS":
-            await _finalize_plan(plan_row.plan_id, success=True)
-            return success_envelope(
-                {"content": result["content"], "plan_id": plan_row.plan_id, "agent_id": decision}
-            ).model_dump()
-        await _finalize_plan(plan_row.plan_id, success=False)
-        return error_envelope(
-            ErrorCode(result["code"]),
-            result.get("error") or "Agent 调用失败",
-            data={"plan_id": plan_row.plan_id, "agent_id": decision},
-        ).model_dump()
-
-    if decision == "COMPLEX":
+        steps: list[dict[str, Any]] = [
+            {
+                "step_id": 0,
+                "agent_id": decision,
+                # SPEC §3.3: 入参同样走 2K token 强截断
+                "sub_query": clip_text_to_token_budget(payload.query),
+                "depends_on": [],
+                "tool_call_id": None,
+                "raw_arguments": {},
+                "no_match": False,
+                "reason": None,
+            }
+        ]
+    elif decision == "COMPLEX":
         plan_row = await _create_plan(
             session_id=payload.session_id,
             raw_query=payload.query,
@@ -133,187 +125,67 @@ async def chat(
             ).model_dump()
 
         await _update_plan_graph(plan_row.plan_id, {"mode": "deep_plan", "steps": steps})
-        # 复用 lifespan 启动的全局 ExpertAgentClient，避免重复起连接池
-        dispatcher = Dispatcher(expert_client=get_expert_client())
-        await dispatcher.start()
-        try:
-            dispatch_result = await dispatcher.dispatch(
-                plan=plan_row,
-                steps=steps,
-                agents_by_id=agents_by_id,
-                session_id=payload.session_id,
-                caller_dept=session.caller_dept,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("dispatch 异常: %s", exc)
-            await _finalize_plan(plan_row.plan_id, success=False)
-            return error_envelope(
-                ErrorCode.PLAN_ORCHESTRATION_FAILED,
-                f"Dispatcher 异常: {exc}",
-                data={"plan_id": plan_row.plan_id},
-            ).model_dump()
-
-        if dispatch_result.final_code == int(ErrorCode.SUCCESS):
-            return success_envelope(
-                {
-                    "content": dispatch_result.final_content,
-                    "plan_id": dispatch_result.plan_id,
-                    "agent_id": dispatch_result.step_results[-1].agent_id if dispatch_result.step_results else None,
-                    "steps": [
-                        {
-                            "step_id": s.step_id,
-                            "agent_id": s.agent_id,
-                            "code": s.code,
-                            "status": s.status,
-                            "latency_ms": s.latency_ms,
-                        }
-                        for s in dispatch_result.step_results
-                    ],
-                }
-            ).model_dump()
-
+    else:
+        # fast_route 返回了非法内容 (理论上不会发生，因为 _normalize 已经收敛)
         return error_envelope(
-            ErrorCode(dispatch_result.final_code),
-            dispatch_result.final_message,
-            data={
-                "plan_id": dispatch_result.plan_id,
-                "steps": [
-                    {
-                        "step_id": s.step_id,
-                        "agent_id": s.agent_id,
-                        "code": s.code,
-                        "status": s.status,
-                        "latency_ms": s.latency_ms,
-                    }
-                    for s in dispatch_result.step_results
-                ],
-            },
+            ErrorCode.PLAN_ORCHESTRATION_FAILED,
+            f"fast_route 决策无法识别: {decision}",
         ).model_dump()
 
-    # fast_route 返回了非法内容 (理论上不会发生，因为 _normalize 已经收敛)
+    # 统一执行: 复用 lifespan 启动的全局 ExpertAgentClient，避免重复起连接池
+    dispatcher = Dispatcher(expert_client=get_expert_client())
+    await dispatcher.start()
+    try:
+        dispatch_result = await dispatcher.dispatch(
+            plan=plan_row,
+            steps=steps,
+            agents_by_id=agents_by_id,
+            session_id=payload.session_id,
+            caller_dept=session.caller_dept,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("dispatch 异常: %s", exc)
+        await _finalize_plan(plan_row.plan_id, success=False)
+        return error_envelope(
+            ErrorCode.PLAN_ORCHESTRATION_FAILED,
+            f"Dispatcher 异常: {exc}",
+            data={"plan_id": plan_row.plan_id},
+        ).model_dump()
+
+    steps_payload = [
+        {
+            "step_id": s.step_id,
+            "agent_id": s.agent_id,
+            "code": s.code,
+            "status": s.status,
+            "latency_ms": s.latency_ms,
+        }
+        for s in dispatch_result.step_results
+    ]
+
+    if dispatch_result.final_code == int(ErrorCode.SUCCESS):
+        return success_envelope(
+            {
+                "content": dispatch_result.final_content,
+                "plan_id": dispatch_result.plan_id,
+                "agent_id": dispatch_result.step_results[-1].agent_id if dispatch_result.step_results else None,
+                "steps": steps_payload,
+            }
+        ).model_dump()
+
     return error_envelope(
-        ErrorCode.PLAN_ORCHESTRATION_FAILED,
-        f"fast_route 决策无法识别: {decision}",
+        ErrorCode(dispatch_result.final_code),
+        dispatch_result.final_message,
+        data={
+            "plan_id": dispatch_result.plan_id,
+            "steps": steps_payload,
+        },
     ).model_dump()
 
 
 # ---------------------------------------------------------
 # 内部辅助方法 (不在 router 暴露)
 # ---------------------------------------------------------
-
-async def _dispatch_single(
-    *,
-    agent: Agent,
-    query: str,
-    session: AgentSession,
-    plan_id: int,
-    session_id: str,
-) -> dict:
-    """单步直跳，与 dispatcher 行为一致但只跑一步。"""
-
-    # 限流
-    try:
-        await get_rate_limiter().check_and_consume(agent.agent_id)
-    except GatewayError as exc:
-        return {"status": "FAILED", "code": int(exc.code), "error": str(exc)}
-
-    # 熔断预检
-    try:
-        await cb_pre_call(agent.agent_id)
-    except GatewayError as exc:
-        return {"status": "FAILED", "code": int(exc.code), "error": str(exc)}
-
-    # SPEC §3.3: 对入参也走 token 强截断，保持一致行为
-    from app.core.token_clip import clip_text_to_token_budget
-    rendered_query = clip_text_to_token_budget(query)
-
-    payload = {
-        "agent_id": agent.agent_id,
-        "sub_query": rendered_query,
-        "context": {
-            "session_id": session_id,
-            "caller_dept": session.caller_dept,
-            "plan_id": plan_id,
-            "step_id": 0,
-        },
-    }
-    expert = get_expert_client()
-    t0 = time.monotonic()
-    res = await expert.invoke(
-        agent,
-        payload=payload,
-        caller_dept=session.caller_dept,
-        timeout_ms=agent.timeout_ms,
-        max_retry=agent.max_retry,
-    )
-    elapsed_ms = res.latency_ms
-    if elapsed_ms == 0 and t0:
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
-
-    gateway_code = downstream_to_gateway_code(res.http_status, timed_out=res.timed_out)
-    success = gateway_code == int(ErrorCode.SUCCESS)
-
-    # 审计
-    await fire_and_forget(
-        plan_id=plan_id,
-        session_id=session_id,
-        target_agent_id=agent.agent_id,
-        step_id=0,
-        request_payload=payload,
-        result=res,
-        code=int(gateway_code),
-        status="SUCCESS" if success else "FAILED",
-        latency_ms=res.latency_ms,
-    )
-
-    if success:
-        cb_on_success(agent.agent_id)
-        await _mark_requested(agent.agent_id)
-        content = ""
-        body = res.body or {}
-        if isinstance(body, dict):
-            data = body.get("data") or {}
-            if isinstance(data, dict):
-                content = data.get("content") or data.get("text") or ""
-        return {"status": "SUCCESS", "code": 200, "content": content, "latency_ms": res.latency_ms}
-
-    if res.timed_out or (res.http_status and res.http_status >= 500):
-        cb_on_failure(agent.agent_id)
-
-    if gateway_code == int(ErrorCode.AGENT_TIMEOUT):
-        return {"status": "FAILED", "code": int(ErrorCode.AGENT_TIMEOUT), "error": "agent timeout"}
-    if gateway_code == int(ErrorCode.BAD_REQUEST):
-        return {"status": "FAILED", "code": int(ErrorCode.BAD_REQUEST), "error": "downstream 4xx"}
-    return {"status": "FAILED", "code": int(ErrorCode.AGENT_5XX_ERROR), "error": res.error or "downstream error"}
-
-
-async def fire_and_forget(
-    *,
-    plan_id: int | None,
-    session_id: str,
-    target_agent_id: str,
-    step_id: int,
-    request_payload: dict,
-    result,
-    code: int,
-    status: str,
-    latency_ms: int,
-) -> None:
-    from app.services.call_log_service import fire_and_forget_record
-
-    await fire_and_forget_record(
-        get_sessionmaker(),
-        plan_id=plan_id,
-        session_id=session_id,
-        target_agent_id=target_agent_id,
-        step_id=step_id,
-        request_snapshot=request_payload,
-        response_snapshot=(result.body or None),
-        code=code,
-        latency_ms=latency_ms,
-        status=status,
-    )
-
 
 async def _create_plan(
     *,
@@ -354,15 +226,3 @@ async def _finalize_plan(plan_id: int, *, success: bool) -> None:
                 return
             plan.status = "SUCCEEDED" if success else "FAILED"
             plan.finished_at = datetime.utcnow()
-
-
-async def _mark_requested(agent_id: str) -> None:
-    sm = get_sessionmaker()
-    try:
-        async with sm() as session:
-            async with session.begin():
-                a = await session.get(Agent, agent_id)
-                if a is not None:
-                    a.last_request_at = datetime.utcnow()
-    except Exception:  # noqa: BLE001
-        logger.exception("更新 last_request_at 失败 %s", agent_id)

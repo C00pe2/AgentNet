@@ -157,6 +157,14 @@ class Dispatcher:
                     if outcome.code == int(ErrorCode.ROUTE_LIMIT_EXCEEDED):
                         aborted_reason_code = outcome.code
                         aborted_reason_msg = f"step {outcome.step_id} 触发网关限流: {outcome.reason or ''}"
+                    elif outcome.code == int(ErrorCode.BAD_REQUEST):
+                        # 下游 4xx: 与原单跳行为一致，透传 BAD_REQUEST
+                        aborted_reason_code = outcome.code
+                        aborted_reason_msg = f"step {outcome.step_id} 下游拒绝请求 (4xx): {outcome.reason or ''}"
+                    elif outcome.code == int(ErrorCode.AGENT_5XX_ERROR):
+                        # 下游 5xx: 与原单跳行为一致，透传 AGENT_5XX_ERROR
+                        aborted_reason_code = outcome.code
+                        aborted_reason_msg = f"step {outcome.step_id} 下游 5xx: {outcome.reason or ''}"
                     elif outcome.timed_out:
                         aborted_reason_code = int(ErrorCode.AGENT_TIMEOUT)
                         aborted_reason_msg = f"step {outcome.step_id} 超时"

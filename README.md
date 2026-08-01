@@ -31,8 +31,6 @@ AgentNet/
 │   ├── schemas/                 Pydantic v2 数据契约
 │   │   ├── agent.py             Manifest 入参/出参
 │   │   ├── session.py
-│   │   ├── plan.py              状态机三态
-│   │   ├── call_log.py
 │   │   ├── metrics.py
 │   │   └── response.py          网关统一 Envelope
 │   ├── core/                    网关核心 (无 IO)
@@ -49,7 +47,6 @@ AgentNet/
 │   ├── services/
 │   │   ├── agent_service.py
 │   │   ├── session_service.py
-│   │   ├── plan_service.py
 │   │   ├── call_log_service.py
 │   │   ├── expert_client.py     下游 Expert Agent HTTP 客户端
 │   │   ├── fast_route.py        一层意图裁决
@@ -82,16 +79,18 @@ python -m scripts.seed    # 建表 + 灌入默认 3 个示例 Agent
 python -m scripts.seed --reset   # 重置
 ```
 
-### 2. 配置 `.env`
+### 2. 配置 `.env` 或 `config/configs.json`
+
+凭据加载优先级: `config/configs.json` → 环境变量 (`AGENTNET_*`) → `.env`。
 
 ```bash
-cp .env.example .env
-# 关键项:
-#   AGENTNET_DATABASE_URL=postgresql+asyncpg://agentnet:agentnet@localhost:5432/agentnet
-#   AGENTNET_LLM_BASE_URL=https://api.deepseek.com/v1
-#   AGENTNET_LLM_API_KEY=sk-xxx
-#   AGENTNET_LLM_MODEL=deepseek-chat
+# 任选其一:
+cp .env.example .env       # 经典: 全部走 .env
+cp config/configs.example.json config/configs.json   # 推荐: 凭据走 configs.json, 不入仓
 ```
+
+`config/configs.json` 适合放不便入仓的 LLM API key（已经被 `.gitignore` 排除）。
+只要填了 `llm.api_key` + `llm.base_url` + `llm.model_id` 就够，其它从 `.env` 走。
 
 ### 3. 启动网关
 

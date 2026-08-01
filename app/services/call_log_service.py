@@ -3,10 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models import AgentCallLog
@@ -46,15 +44,6 @@ class CallLogService:
         await self.session.flush()
         await self.session.refresh(log)
         return log
-
-    async def list_by_plan(self, plan_id: int) -> list[AgentCallLog]:
-        stmt = (
-            select(AgentCallLog)
-            .where(AgentCallLog.plan_id == plan_id)
-            .order_by(AgentCallLog.step_id, AgentCallLog.log_id)
-        )
-        result = await self.session.execute(stmt)
-        return list(result.scalars().all())
 
 
 async def fire_and_forget_record(

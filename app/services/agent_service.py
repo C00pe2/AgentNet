@@ -1,7 +1,6 @@
 """agents 表 CRUD (SPEC §4-1)。"""
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Sequence
 
 from sqlalchemy import select
@@ -34,32 +33,3 @@ class AgentService:
         stmt = select(Agent)
         result = await self.session.execute(stmt)
         return result.scalars().all()
-
-    async def update_status(self, agent_id: str, status: str) -> None:
-        agent = await self.session.get(Agent, agent_id)
-        if agent is None:
-            return
-        agent.status = status
-        await self.session.flush()
-
-    async def reset_health_failures(self, agent_id: str) -> None:
-        agent = await self.session.get(Agent, agent_id)
-        if agent is None:
-            return
-        agent.consecutive_health_failures = 0
-        await self.session.flush()
-
-    async def increment_health_failures(self, agent_id: str) -> int:
-        agent = await self.session.get(Agent, agent_id)
-        if agent is None:
-            return 0
-        agent.consecutive_health_failures = (agent.consecutive_health_failures or 0) + 1
-        await self.session.flush()
-        return agent.consecutive_health_failures
-
-    async def mark_requested_now(self, agent_id: str, ts: datetime | None = None) -> None:
-        agent = await self.session.get(Agent, agent_id)
-        if agent is None:
-            return
-        agent.last_request_at = ts or datetime.utcnow()
-        await self.session.flush()
