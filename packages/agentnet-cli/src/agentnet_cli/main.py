@@ -209,7 +209,15 @@ def ask(
         else:
             console.print()
         for artifact in result.artifacts:
-            console.print(f"[dim]工件:{artifact.name}[/dim]")
+            console.print(f"[dim]—— 工件:{artifact.name} ——[/dim]")
+            for part in artifact.parts:
+                if part.type == "text":
+                    console.print(part.text, highlight=False)
+                elif part.type == "file":
+                    size = f"{len(part.data) * 3 // 4}B(base64)" if part.data else (part.url or "")
+                    console.print(f"[dim]文件 {part.name}({part.mime_type},{size})[/dim]")
+                else:
+                    console.print(f"[dim]结构化数据:{json.dumps(part.data, ensure_ascii=False)[:200]}[/dim]")
         if result.routed and not result.fallback:
             err.print(f"[dim]—— 由网络中的 {result.agent_id} 回答({result.reason})[/dim]")
         elif result.routed:

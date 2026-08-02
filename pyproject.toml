@@ -9,6 +9,7 @@ dependencies = [
     "agentnet-sdk",
     "agentnet-router",
     "agentnet-cli",
+    "agentnet-mcp-server",
 ]
 
 [tool.uv.workspace]
@@ -20,6 +21,7 @@ agentnet-registry = { workspace = true }
 agentnet-sdk = { workspace = true }
 agentnet-router = { workspace = true }
 agentnet-cli = { workspace = true }
+agentnet-mcp-server = { workspace = true }
 torch = { index = "pytorch-cpu" }
 
 [[tool.uv.index]]

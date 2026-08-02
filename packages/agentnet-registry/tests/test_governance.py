@@ -38,7 +38,7 @@ def test_breaker_half_open_recovery():
     breaker.on_failure("a")
     breaker.on_failure("a")
     assert breaker.pre_check("a") is False
-    time.sleep(0.06)
+    time.sleep(0.15)  # 留足余量,避免 Windows 定时器精度导致的抖动
     assert breaker.pre_check("a") is True  # 半开放行
     breaker.on_success("a")
     assert breaker.pre_check("a") is True

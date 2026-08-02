@@ -19,9 +19,10 @@ packages/
 ├── agentnet-registry/   # 注册中心 + 网关:注册/鉴权/巡检/召回/信誉/Gateway 代理(FastAPI + Postgres/pgvector)
 ├── agentnet-sdk/        # provider 侧:@skill 装饰器包装 agent,自动实现全部协议端点
 ├── agentnet-router/     # consumer 侧:召回 → LLM 精排 → task client(SSE)→ 本地兜底
-└── agentnet-cli/        # agentnet register / ask / serve / search / list / create-key
+├── agentnet-cli/        # agentnet register / ask / serve / search / list / create-key
+└── agentnet-mcp-server/ # 把整个网络暴露成一个 MCP 工具(Claude/Cursor 直连)
 examples/                # 3 个 demo agent(go-reviewer / translator / sql-optimizer)+ Agent Card YAML
-scripts/e2e.py           # 端到端验收脚本(20 条路由用例 + SSE 流式 + 兜底 + 信誉闭环)
+scripts/e2e.py           # 端到端验收脚本(路由准确率 + SSE 流式 + 澄清 + 兜底 + 信誉 + 巡检)
 ```
 
 ## 快速开始
@@ -69,7 +70,39 @@ uv run python scripts/e2e.py                  # 端到端验收(hash embedding,�
 uv run python scripts/e2e.py --real-embedding # 使用本地 bge-m3(首次下载 ~2.3GB)
 ```
 
-E2E 验收标准:20 条路由用例准确率 ≥ 80%;`ask` 走通 SSE 流式;无人能答的问题正确本地兜底;feedback 回流更新信誉。
+E2E 验收标准:20 条路由用例准确率 ≥ 80%;`ask` 走通 SSE 流式;input-required 多轮澄清全链路;
+无人能答的问题正确本地兜底;feedback 回流更新信誉;巡检把宕机 agent 踢出召回并在恢复后自动加回。
+
+## MCP 接入(Claude / Cursor 直连)
+
+`agentnet-mcp-server` 把整个网络暴露成一个 MCP server(stdio),提供三个工具:
+`agentnet_search`(试召回)、`agentnet_list`(含信誉)、`agentnet_ask`(自动路由提问)。
+
+```bash
+uv run agentnet-mcp   # 或 python -m agentnet_mcp_server
+```
+
+Claude Desktop 配置(`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "agentnet": {
+      "command": "uv",
+      "args": ["run", "--directory", "D:\\project\\AgentNet", "agentnet-mcp"],
+      "env": {
+        "AGENTNET_REGISTRY_URL": "http://localhost:9000",
+        "AGENTNET_CONSUMER_KEY": "<consumer key>",
+        "AGENTNET_LLM_BASE_URL": "https://api.openai.com/v1",
+        "AGENTNET_LLM_API_KEY": "<llm key>",
+        "AGENTNET_LLM_MODEL": "gpt-4o-mini"
+      }
+    }
+  }
+}
+```
+
+远程 agent 返回的内容在工具输出中标注为不受信数据,客户端不应将其当作指令执行。
 
 ## 协议速览
 
@@ -84,5 +117,5 @@ Task 状态机:`submitted → working → (input-required) → completed | faile
 ## 路线图
 
 - [x] Phase 1:协议与核心闭环(core / registry / sdk / router / cli + e2e 验收)
-- [ ] Phase 2:input-required 多轮澄清全链路、信誉进精排特征、定期巡检、`agentnet-mcp-server`
+- [x] Phase 2(部分):input-required 多轮澄清全链路 ✅、信誉进精排特征 ✅、定期巡检(health + card 一致性)✅、`agentnet-mcp-server` ✅
 - [ ] Phase 3:canary 跑分、计费、PII 过滤加固、联邦 registry

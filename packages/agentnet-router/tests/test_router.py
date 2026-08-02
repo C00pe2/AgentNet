@@ -59,6 +59,7 @@ def make_registry_handler(
     sse: str = SSE_OK,
     task_id: str = "t-1",
     posted_messages: list | None = None,
+    canceled: list | None = None,
 ):
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -79,6 +80,10 @@ def make_registry_handler(
         if path.endswith("/messages") and request.method == "POST":
             if posted_messages is not None:
                 posted_messages.append(json.loads(request.content))
+            return httpx.Response(200, json={"code": 0, "message": "ok", "data": {}})
+        if path.endswith("/cancel") and request.method == "POST":
+            if canceled is not None:
+                canceled.append(task_id)
             return httpx.Response(200, json={"code": 0, "message": "ok", "data": {}})
         if "/tasks/" in path:
             return httpx.Response(
@@ -201,6 +206,20 @@ async def test_ask_input_required_flow():
     assert result.answer == "main 已审查"
     assert len(posted) == 1
     assert posted[0]["message"]["parts"][0]["text"] == "main"
+
+
+async def test_ask_input_required_without_callback_cancels():
+    """agent 要求澄清但消费端无应答回调:主动取消任务并本地兜底,不能挂起。"""
+    canceled: list = []
+    router = make_router(
+        make_registry_handler(sse=SSE_ASK, canceled=canceled),
+        make_llm_handler(RERANK_PICK_GO),
+    )
+    result = await router.ask("review 一下")
+    assert result.fallback is True
+    assert result.answer == "本地 LLM 答案"
+    assert "未提供应答回调" in result.reason
+    assert canceled == ["t-1"]  # 任务被主动取消
 
 
 async def test_route_decision_reason_when_registry_down():

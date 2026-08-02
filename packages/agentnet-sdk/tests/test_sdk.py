@@ -5,7 +5,7 @@ import json
 
 import httpx
 import pytest
-from agentnet_core import AgentCard, SseParser
+from agentnet_core import AgentCard, SseParser, TextPart
 from agentnet_sdk import AgentServer
 
 AUTH = {"Authorization": "Bearer secret"}
@@ -206,3 +206,24 @@ async def test_late_subscriber_replays_deltas():
         deltas = [json.loads(d)["text"] for e, d in events if e == "delta"]
         assert deltas == ["进度 1 ", "进度 2 ", "结论"]
         assert json.loads(events[-1][1])["state"] == "completed"
+
+
+async def test_artifact_broadcast_persisted_and_replayed():
+    server = make_server()
+
+    @server.skill
+    async def handle(ctx):
+        await ctx.add_artifact("fix.diff", [TextPart(text="--- a\n+++ b")])
+        return "done"
+
+    async with client_for(server) as client:
+        task_id = await create_task(client)
+        # 实时订阅:收到 artifact 事件
+        events = await collect_events(client, task_id)
+        assert any(e == "artifact" and json.loads(d)["name"] == "fix.diff" for e, d in events)
+        # 持久化:GET /tasks 能取回
+        task = (await client.get(f"/tasks/{task_id}")).json()
+        assert task["artifacts"][0]["parts"][0]["text"] == "--- a\n+++ b"
+        # 迟到订阅:补发 artifact
+        events = await collect_events(client, task_id)
+        assert any(e == "artifact" and json.loads(d)["name"] == "fix.diff" for e, d in events)

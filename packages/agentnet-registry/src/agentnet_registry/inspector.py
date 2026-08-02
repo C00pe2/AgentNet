@@ -1,4 +1,4 @@
-"""巡检:周期性 GET /health,连续失败达阈值标记 offline,恢复后自动回 active。
+"""巡检:周期性 GET /health + GET /card 一致性校验,连续失败达阈值标记 offline,恢复后自动回 active。
 
 用 asyncio 后台任务实现,不引入额外调度依赖。巡检失败永不影响主流程。
 """
@@ -33,6 +33,16 @@ class Inspector:
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._stopped.wait(), timeout=self._interval)
 
+    async def _check_agent(self, row: AgentRow) -> bool:
+        """health 通过且 /card 上报的 agent_id 与注册一致,才算健康。"""
+        client = AgentHttpClient(self._http, row, timeout=3.0)
+        if not await client.health():
+            return False
+        with contextlib.suppress(Exception):
+            card = await client.get_card()
+            return card.get("agent_id") == row.agent_id
+        return False
+
     async def tick(self) -> None:
         async with self._sm() as session:
             agent_ids = (await session.execute(select(AgentRow.agent_id))).scalars().all()
@@ -42,8 +52,7 @@ class Inspector:
                 row = await session.get(AgentRow, agent_id)
                 if row is None:
                     continue
-                client = AgentHttpClient(self._http, row, timeout=3.0)
-                healthy = await client.health()
+                healthy = await self._check_agent(row)
                 if healthy:
                     row.consecutive_health_failures = 0
                     row.status = AgentStatus.ACTIVE.value

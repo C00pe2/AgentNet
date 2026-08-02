@@ -40,6 +40,10 @@ class RegistryClient:
             raise RegistryError(resp.status_code, message)
         return resp
 
+    async def list_agents(self) -> list[dict]:
+        resp = self._check(await self._http.get(f"{self._base}/agents", timeout=self._timeout))
+        return resp.json()["data"]
+
     async def search(self, query: str, top_k: int) -> list[Candidate]:
         resp = self._check(
             await self._http.get(
@@ -76,6 +80,15 @@ class RegistryClient:
             await self._http.post(
                 f"{self._base}/agents/{agent_id}/tasks/{task_id}/messages",
                 json={"message": message.model_dump(mode="json")},
+                timeout=self._timeout,
+            )
+        )
+        return resp.json()["data"]
+
+    async def cancel_task(self, agent_id: str, task_id: str) -> dict:
+        resp = self._check(
+            await self._http.post(
+                f"{self._base}/agents/{agent_id}/tasks/{task_id}/cancel",
                 timeout=self._timeout,
             )
         )

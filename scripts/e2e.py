@@ -75,6 +75,27 @@ async def wait_http(url: str, timeout: float = 60.0) -> None:
             await asyncio.sleep(0.5)
 
 
+async def wait_agent_status(agent_id: str, status: str, consumer_key: str, timeout: float = 20.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    headers = {"Authorization": f"Bearer {consumer_key}"}
+    async with httpx.AsyncClient(base_url=REGISTRY_URL) as client:
+        while True:
+            resp = await client.get(f"/v1/agents/{agent_id}", headers=headers)
+            current = resp.json()["data"]["status"]
+            if current == status:
+                return
+            if asyncio.get_running_loop().time() > deadline:
+                raise TimeoutError(f"{agent_id} 未在 {timeout}s 内变为 {status}(当前 {current})")
+            await asyncio.sleep(0.5)
+
+
+async def search_ids(query: str, consumer_key: str) -> list[str]:
+    headers = {"Authorization": f"Bearer {consumer_key}"}
+    async with httpx.AsyncClient(base_url=REGISTRY_URL) as client:
+        resp = await client.get("/v1/agents/search", params={"q": query}, headers=headers)
+        return [c["card"]["agent_id"] for c in resp.json()["data"]["candidates"]]
+
+
 async def main() -> int:
     load_dotenv(ROOT / ".env")
     real_embedding = "--real-embedding" in sys.argv
@@ -88,7 +109,9 @@ async def main() -> int:
         "AGENTNET_DATABASE_URL": f"sqlite+aiosqlite:///{registry_db}",
         "AGENTNET_EMBEDDING_BACKEND": "sentence-transformers" if real_embedding else "hash",
         "AGENTNET_ADMIN_KEY": ADMIN_KEY,
-        "AGENTNET_INSPECT_ENABLED": "false",
+        "AGENTNET_INSPECT_ENABLED": "true",
+        "AGENTNET_INSPECT_INTERVAL_SEC": "1",
+        "AGENTNET_INSPECT_FAIL_THRESHOLD": "2",
     }
     registry_proc = subprocess.Popen(
         [sys.executable, "-m", "agentnet_registry"],
@@ -174,18 +197,50 @@ async def main() -> int:
         if accuracy < 0.8:
             failures.append(f"准确率 {accuracy:.0%} 低于 80%")
 
-        # 完整 ask:路由成功 + SSE 流式
-        log("测试完整 ask(SSE 流式)...")
+        # 完整 ask:路由成功 + SSE 流式 + artifact 产出
+        log("测试完整 ask(SSE 流式 + artifact)...")
         deltas: list[str] = []
         result = await router.ask("帮我看看这段 Go 代码有没有并发问题", on_delta=deltas.append)
         assert result.routed and not result.fallback, result.reason
         assert result.agent_id == "go-reviewer" and deltas, result
-        log(f"ask 路由成功,{len(deltas)} 个流式增量,回答 {len(result.answer)} 字")
+        assert result.artifacts and result.artifacts[0].name == "fix.diff", result.artifacts
+        diff_text = "".join(p.text for p in result.artifacts[0].parts if p.type == "text")
+        assert "close(results)" in diff_text, diff_text
+        log(
+            f"ask 路由成功,{len(deltas)} 个流式增量,回答 {len(result.answer)} 字,"
+            f"artifact fix.diff({len(diff_text)} 字 diff)"
+        )
 
         # 完整 ask:无人能答 → 本地兜底
         result = await router.ask("宇宙的意义是什么?")
         assert result.fallback, "应当本地兜底"
         log(f"ask 本地兜底正常(回答 {len(result.answer)} 字)")
+
+        # 完整 ask:input-required 多轮澄清(sql-optimizer 会追问表结构)
+        log("测试 input-required 多轮澄清...")
+        asked: list[str] = []
+
+        async def on_input(question: str) -> str:
+            asked.append(question)
+            return "orders 表,已有 user_id 索引"
+
+        result = await router.ask("这条 SQL 查询很慢,帮我优化", on_input_required=on_input)
+        assert result.routed and not result.fallback, result.reason
+        assert result.agent_id == "sql-optimizer" and asked, result
+        assert "orders 表" in result.answer, result.answer
+        async with httpx.AsyncClient(base_url=REGISTRY_URL) as client:
+            resp = await client.get(
+                f"/v1/agents/sql-optimizer/tasks/{result.task_id}",
+                headers={"Authorization": f"Bearer {consumer_key}"},
+            )
+            roles = [m["role"] for m in resp.json()["data"]["messages"]]
+            assert roles[0] == "user" and roles.count("user") == 2 and "agent" in roles, roles
+        log(f"澄清链路正常(agent 追问 {len(asked)} 次,问答已落库:{roles})")
+
+        # 无应答回调时:agent 要求澄清 → router 主动取消并本地兜底(不挂起)
+        result = await router.ask("这条 JOIN 能优化吗")
+        assert result.fallback and "应答回调" in result.reason, result
+        log("无回调澄清场景:已主动取消并本地兜底")
 
         # 反馈 → 信誉
         routed = await router.ask("review 一下这段 Go 代码")
@@ -199,6 +254,27 @@ async def main() -> int:
                 rep = resp.json()["data"]["reputation"]
                 log(f"go-reviewer 信誉:调用 {rep['calls']} 次,成功率 {rep['success_rate']:.0%},评分 {rep['rating']}")
                 assert rep["calls"] >= 1 and rep["success_rate"] == 1.0
+
+        # 巡检:translator 宕机 → offline 且退出召回;恢复 → active 且回到召回
+        log("测试巡检(translator 宕机 → 恢复)...")
+        agent_procs["translator"].terminate()
+        agent_procs["translator"].wait(timeout=10)
+        await wait_agent_status("translator", "offline", consumer_key)
+        ids = await search_ids("帮我把这段中文翻译成英文", consumer_key)
+        assert "translator" not in ids, ids
+        log("translator 已 offline 并退出召回")
+
+        proc = subprocess.Popen(
+            [sys.executable, str(ROOT / "examples" / "agents" / "translator.py")],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        agent_procs["translator"] = proc
+        await wait_http("http://localhost:8002/health")
+        await wait_agent_status("translator", "active", consumer_key)
+        ids = await search_ids("帮我把这段中文翻译成英文", consumer_key)
+        assert "translator" in ids, ids
+        log("translator 恢复 active 并回到召回")
         await router.aclose()
 
     finally:

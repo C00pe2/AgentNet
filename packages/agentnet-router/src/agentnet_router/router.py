@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -47,6 +48,10 @@ OnDelta = Callable[[str], None]
 OnInputRequired = Callable[[str], Awaitable[str]]
 
 
+class _ClarificationUnsupported(Exception):
+    """agent 要求澄清,但消费端未提供应答回调。"""
+
+
 class Router:
     def __init__(
         self,
@@ -64,6 +69,18 @@ class Router:
         await self._client.aclose()
         if self._llm_http is not None:
             await self._llm_http.aclose()
+
+    # ------------------------------------------------------------------
+    # 控制面查询(不发起任务)
+    # ------------------------------------------------------------------
+
+    async def search(self, query: str, top_k: int | None = None) -> list[Candidate]:
+        """试召回:看网络认为哪些 agent 能解决 query。"""
+        return await self._client.search(query, top_k or self._settings.top_k)
+
+    async def list_agents(self) -> list[dict]:
+        """列出网络中的全部 agent(含信誉)。"""
+        return await self._client.list_agents()
 
     # ------------------------------------------------------------------
     # 路由决策(不发起任务)
@@ -131,6 +148,16 @@ class Router:
                 final_state = await self._handle_event(
                     event, data, agent_id, task_id, deltas, artifacts, on_delta, on_input_required
                 ) or final_state
+        except _ClarificationUnsupported:
+            # 无人应答澄清:主动取消任务,避免挂到 gateway 超时
+            with contextlib.suppress(httpx.HTTPError, RegistryError):
+                await self._client.cancel_task(agent_id, task_id)
+            return await self._fallback(
+                query,
+                reason="agent 需要澄清,但消费端未提供应答回调,已本地兜底",
+                agent_id=agent_id,
+                task_id=task_id,
+            )
         except (httpx.HTTPError, RegistryError) as exc:
             return await self._fallback(
                 query, reason=f"事件流中断({exc})", agent_id=agent_id, task_id=task_id
@@ -167,7 +194,9 @@ class Router:
                 on_delta(text)
         elif event == constants.SSE_ARTIFACT:
             artifacts.append(Artifact(**json.loads(data)))
-        elif event == constants.SSE_MESSAGE and on_input_required:
+        elif event == constants.SSE_MESSAGE:
+            if on_input_required is None:
+                raise _ClarificationUnsupported
             question = _text_of_message(json.loads(data))
             answer = await on_input_required(question)
             await self._client.append_message(agent_id, task_id, Message.user_text(answer))
