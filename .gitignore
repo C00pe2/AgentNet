@@ -23,7 +23,7 @@ tests/*.db
 tests/*.sqlite
 tests/*.sqlite3
 .e2e_registry*.db
-docs/
+docs/for_creator/
 web/node_modules/
 web/dist/
 web/.vite/
