@@ -24,6 +24,7 @@ packages/
 └── agentnet-mcp-server/ # 把整个网络暴露成一个 MCP 工具(Claude/Cursor 直连)
 examples/                # 3 个 demo agent(go-reviewer / translator / sql-optimizer)+ Agent Card YAML
 scripts/e2e.py           # 端到端验收脚本(路由准确率 + SSE 流式 + 澄清 + 兜底 + 信誉 + 巡检)
+web/                     # React + Vite + TS 控制台:聊天 + Agents + 注册 agent(Vite dev proxy 转发 /v1 → :9000)
 ```
 
 ## 快速开始
@@ -74,6 +75,46 @@ uv run python scripts/e2e.py --real-embedding # 使用本地 bge-m3(首次下载
 E2E 验收标准:20 条路由用例准确率 ≥ 80%;`ask` 走通 SSE 流式;input-required 多轮澄清全链路;
 无人能答的问题正确本地兜底;feedback 回流更新信誉;巡检把宕机 agent 踢出召回并在恢复后自动加回;
 canary 用例跑分计入信誉(防能力欺诈:声称的能力必须能通过 provider 自己声明的用例)。
+
+## 前端控制台(web/)
+
+浏览器交互手册见 [docs/前端控制台.md](docs/前端控制台.md)。
+
+`web/` 是一个独立的 React + Vite + TS 控制台,把**你本地的 agent** 接入网络:
+registry 启动后网络是空的,在「注册 Agent」页把本地 agent 的 endpoint 登记进来,
+它就接入了——「Agents」页能看到,「聊天」页能问它。
+
+后端没有 CORS 中间件,因此开发模式用 Vite dev proxy 把 `/v1` 和 `/healthz`
+转发到 `http://localhost:9000`,零后端改动。
+
+```bash
+# 终端 1:起 registry(空网络)+ 一个本地 agent(自带的 go_reviewer 就是个参考实现)
+uv run agentnet registry &
+uv run python examples/agents/go_reviewer.py &
+
+# 终端 2:起前端(默认 5173)
+cd web
+npm install      # 注意:Windows PowerShell 需用 npm.cmd
+npm run dev
+# 浏览器打开 http://localhost:5173,设置里填 Consumer / Provider API Key
+```
+
+前端能力:
+- **注册 Agent**:Provider key 下的 AgentCard 表单(agent_id / name / description /
+  natural_capabilities / capabilities / endpoint / auth / pricing / canary_cases);
+  registry 回调 endpoint 验证 agent 真实存在后才入库。
+- **Agents**:网络里现在有什么——列表 + 语义搜索 + 详情弹窗 + 一键"向它提问"(跳过自动路由,锁定 agent)。
+- **聊天**:提问 → 自动 search 召回 → 选 top1 → 建 task → fetch 订阅 SSE 流式渲染;
+  路由过程对用户可见(top-K 候选 + 相似度);`input-required` 时输入框切换为澄清模式;
+  完成后 0–5 星评分写回 feedback。浏览器不放 LLM key,不做精排与本地兜底。
+
+```bash
+cd web
+npm run build    # 类型检查 + 生产构建
+npm run preview  # 预览构建产物
+```
+
+> 生产部署:registry 需要挂 `CORSMiddleware`,或在 nginx 等反代后面把 `/v1` 转到 registry。
 
 ## MCP 接入(Claude / Cursor 直连)
 

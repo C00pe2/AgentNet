@@ -24,3 +24,6 @@ tests/*.sqlite
 tests/*.sqlite3
 .e2e_registry*.db
 docs/
+web/node_modules/
+web/dist/
+web/.vite/
