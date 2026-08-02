@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from sqlalchemy import case, func, select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from agentnet_core import Reputation
 from agentnet_core.enums import TaskState
+from sqlalchemy import case, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import CallLogRow
 

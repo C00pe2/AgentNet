@@ -26,12 +26,9 @@ import inspect
 import json
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import StreamingResponse
-
 from agentnet_core import (
     AgentCard,
     Artifact,
@@ -44,6 +41,8 @@ from agentnet_core import (
 )
 from agentnet_core.enums import TaskState
 from agentnet_core.sse import format_event
+from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import StreamingResponse
 
 
 class TaskContext:
@@ -97,7 +96,7 @@ class _TaskRuntime:
 
     def set_state(self, state: TaskState) -> None:
         self.task.state = state
-        self.task.updated_at = datetime.now(timezone.utc)
+        self.task.updated_at = datetime.now(UTC)
         self.broadcast(constants.SSE_STATE, {"state": state.value})
 
     def broadcast(self, event: str, data: dict) -> None:
@@ -107,7 +106,18 @@ class _TaskRuntime:
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue()
-        # 迟到订阅者:补发当前状态;若已终结直接收尾
+        # 迟到订阅者:先补发已缓冲的增量/工件(以及待回答的追问),再补发当前状态;若已终结直接收尾。
+        # 全程无 await,与 broadcast 在同一事件循环内原子执行,不会漏事件。
+        for text in self.delta_buffer:
+            payload = json.dumps({"text": text}, ensure_ascii=False)
+            q.put_nowait(format_event(constants.SSE_DELTA, payload))
+        for artifact in self.task.artifacts:
+            q.put_nowait(format_event(constants.SSE_ARTIFACT, artifact.model_dump_json()))
+        if self.task.state == TaskState.INPUT_REQUIRED:
+            for msg in reversed(self.task.messages):
+                if msg.role == "agent":
+                    q.put_nowait(format_event(constants.SSE_MESSAGE, msg.model_dump_json()))
+                    break
         q.put_nowait(format_event(constants.SSE_STATE, json.dumps({"state": self.task.state.value})))
         if self.task.is_terminal:
             q.put_nowait(None)
@@ -166,6 +176,9 @@ class AgentServer:
                 produced = await produced
             if isinstance(produced, str) and produced:
                 rt.task.messages.append(Message.agent_text(produced))
+                # 最终结论也作为 delta 广播,保证流式消费者拿到完整回答
+                rt.delta_buffer.append(produced)
+                rt.broadcast(constants.SSE_DELTA, {"text": produced})
             elif rt.delta_buffer:
                 rt.task.messages.append(Message.agent_text("".join(rt.delta_buffer)))
             rt.set_state(TaskState.COMPLETED)

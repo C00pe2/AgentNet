@@ -8,9 +8,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 
-from sqlalchemy import select
-
 from agentnet_core.enums import AgentStatus
+from sqlalchemy import select
 
 from .db import AgentRow
 from .gateway import AgentHttpClient

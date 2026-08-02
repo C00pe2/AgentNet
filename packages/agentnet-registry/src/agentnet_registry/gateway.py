@@ -6,14 +6,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
-from fastapi import HTTPException
-from sqlalchemy import select
-
 from agentnet_core import constants
 from agentnet_core.enums import TaskState
+from fastapi import HTTPException
+from sqlalchemy import select
 
 from .db import AgentRow, CallLogRow
 
@@ -84,13 +83,13 @@ async def record_terminal(sm, task_id: str, state: TaskState, error: str | None 
         row = await session.scalar(select(CallLogRow).where(CallLogRow.task_id == task_id))
         if row is None or row.final_state is not None:
             return
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         row.final_state = state.value
         row.finished_at = now
         created = row.created_at
         if created is not None:
             if created.tzinfo is None:
-                created = created.replace(tzinfo=timezone.utc)
+                created = created.replace(tzinfo=UTC)
             row.latency_ms = int((now - created).total_seconds() * 1000)
         row.error = error
         await session.commit()

@@ -1,8 +1,6 @@
 """agentnet-core 模型单元测试:序列化 round-trip、校验、状态机语义。"""
 
 import pytest
-from pydantic import ValidationError
-
 from agentnet_core import (
     AgentCard,
     Artifact,
@@ -16,6 +14,7 @@ from agentnet_core import (
     TaskState,
     TextPart,
 )
+from pydantic import ValidationError
 
 
 def test_part_discriminator_roundtrip():

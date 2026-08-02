@@ -8,16 +8,15 @@ import uuid
 from collections.abc import AsyncIterator
 
 import httpx
+from agentnet_core import constants
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from agentnet_core import constants
-
 from . import __version__
 from .config import Settings
-from .db import init_db, init_engine, get_sessionmaker
+from .db import get_sessionmaker, init_db, init_engine
 from .embedding import build_embedder
 from .governance import CircuitBreaker, RateLimiter
 from .inspector import Inspector

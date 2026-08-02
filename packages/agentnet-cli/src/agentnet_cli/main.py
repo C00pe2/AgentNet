@@ -12,12 +12,11 @@ from pathlib import Path
 import httpx
 import typer
 import yaml
-from dotenv import load_dotenv
-from rich.console import Console
-
 from agentnet_core import AgentCard
 from agentnet_router import Router, RouterSettings
 from agentnet_sdk import AgentServer
+from dotenv import load_dotenv
+from rich.console import Console
 
 app = typer.Typer(help="AgentNet CLI", no_args_is_help=True)
 console = Console()
@@ -57,7 +56,6 @@ def _check(resp: httpx.Response) -> httpx.Response:
 def registry(host: str | None = typer.Option(None), port: int | None = typer.Option(None)) -> None:
     """启动 Registry 服务(等价 python -m agentnet_registry)。"""
     import uvicorn
-
     from agentnet_registry.app import create_app
     from agentnet_registry.config import Settings
 

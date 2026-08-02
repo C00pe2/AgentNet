@@ -2,7 +2,6 @@
 
 import pytest
 import typer
-
 from agentnet_cli.main import load_card, load_server
 
 CARD_YAML = """

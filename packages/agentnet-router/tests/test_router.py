@@ -4,7 +4,6 @@ import json
 
 import httpx
 import pytest
-
 from agentnet_router import (
     LLMSettings,
     RegistryClient,
@@ -73,10 +72,8 @@ def make_registry_handler(
             }
             return httpx.Response(200, json={"code": 0, "message": "ok", "data": data})
         if path.endswith("/tasks") and request.method == "POST":
-            return httpx.Response(
-                200,
-                json={"code": 0, "message": "ok", "data": {"id": task_id, "state": "submitted", "messages": [], "artifacts": []}},
-            )
+            data = {"id": task_id, "state": "submitted", "messages": [], "artifacts": []}
+            return httpx.Response(200, json={"code": 0, "message": "ok", "data": data})
         if path.endswith("/events"):
             return httpx.Response(200, text=sse, headers={"content-type": "text/event-stream"})
         if path.endswith("/messages") and request.method == "POST":

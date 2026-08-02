@@ -2,7 +2,6 @@
 
 from . import constants
 from .enums import AgentStatus, MessageRole, TaskState
-from .sse import SseParser, format_event
 from .models import (
     AgentAuth,
     AgentCard,
@@ -18,6 +17,7 @@ from .models import (
     TaskCreate,
     TextPart,
 )
+from .sse import SseParser, format_event
 
 __version__ = "0.1.0"
 

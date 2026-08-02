@@ -13,7 +13,6 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 import httpx
-
 from agentnet_core import Artifact, Message, constants
 from agentnet_core.enums import TaskState
 

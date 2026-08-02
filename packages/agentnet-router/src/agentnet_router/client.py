@@ -6,7 +6,6 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 import httpx
-
 from agentnet_core import AgentCard, Message, SseParser, constants
 
 

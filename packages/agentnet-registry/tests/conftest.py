@@ -11,14 +11,13 @@ import tempfile
 
 import httpx
 import pytest
-from asgi_lifespan import LifespanManager
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
-
 from agentnet_registry.app import create_app
 from agentnet_registry.config import Settings
 from agentnet_registry.db import Base, get_engine
 from agentnet_registry.security import ensure_admin_key
+from asgi_lifespan import LifespanManager
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
 
 ADMIN_KEY = "test-admin-key"
 ADMIN = {"Authorization": f"Bearer {ADMIN_KEY}"}

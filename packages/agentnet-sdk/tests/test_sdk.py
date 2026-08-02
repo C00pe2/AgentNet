@@ -5,7 +5,6 @@ import json
 
 import httpx
 import pytest
-
 from agentnet_core import AgentCard, SseParser
 from agentnet_sdk import AgentServer
 
@@ -185,4 +184,25 @@ async def test_late_subscriber_gets_terminal_state():
         task_id = await create_task(client)
         await wait_state(client, task_id, "completed")
         events = await collect_events(client, task_id)  # 结束后才订阅
-        assert json.loads(events[0][1])["state"] == "completed"
+        assert events[0] == ("delta", '{"text": "done"}')  # 补发最终增量
+        assert json.loads(events[-1][1])["state"] == "completed"
+
+
+async def test_late_subscriber_replays_deltas():
+    """竞态:任务在订阅 events 前已跑完,迟到的订阅者必须拿到完整增量流。"""
+
+    server = make_server()
+
+    @server.skill
+    async def handle(ctx):
+        await ctx.emit("进度 1 ")
+        await ctx.emit("进度 2 ")
+        return "结论"
+
+    async with client_for(server) as client:
+        task_id = await create_task(client)
+        await wait_state(client, task_id, "completed")
+        events = await collect_events(client, task_id)
+        deltas = [json.loads(d)["text"] for e, d in events if e == "delta"]
+        assert deltas == ["进度 1 ", "进度 2 ", "结论"]
+        assert json.loads(events[-1][1])["state"] == "completed"

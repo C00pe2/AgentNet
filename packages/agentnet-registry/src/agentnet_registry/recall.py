@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import math
 
+from agentnet_core.enums import AgentStatus
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from agentnet_core.enums import AgentStatus
 
 from .db import AgentRow
 

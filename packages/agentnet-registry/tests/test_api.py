@@ -1,9 +1,7 @@
 """Registry API 集成测试(需要本地 postgres;agent 侧用 MockTransport)。"""
 
-import pytest
 
 from conftest import (
-    ADMIN,
     GO_CARD,
     SQL_CARD,
     TRANSLATE_CARD,
@@ -53,7 +51,8 @@ async def test_register_and_search_and_mask(app_and_client):
         assert resp.status_code == 200, resp.text
 
     # 召回排序:go 查询 → go-reviewer 第一
-    resp = await client.get("/v1/agents/search", params={"q": "帮我 review 这段 go 代码有没有并发问题"}, headers=consumer)
+    params = {"q": "帮我 review 这段 go 代码有没有并发问题"}
+    resp = await client.get("/v1/agents/search", params=params, headers=consumer)
     assert resp.status_code == 200, resp.text
     candidates = resp.json()["data"]["candidates"]
     assert candidates[0]["card"]["agent_id"] == "go-reviewer"
@@ -155,9 +154,8 @@ async def test_offline_agent_hidden_and_unavailable(app_and_client):
     await client.post("/v1/agents", json=GO_CARD, headers=provider)
 
     # 直接把 DB 里的状态改成 offline(模拟巡检效果)
-    from sqlalchemy import update
-
     from agentnet_registry.db import AgentRow
+    from sqlalchemy import update
 
     async with app.state.session_maker() as session:
         await session.execute(update(AgentRow).where(AgentRow.agent_id == "go-reviewer").values(status="offline"))
