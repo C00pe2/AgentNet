@@ -18,6 +18,7 @@ from agentnet_core import Artifact, Message, constants
 from agentnet_core.enums import TaskState
 
 from .client import Candidate, RegistryClient, RegistryError
+from .guard import find_secret, redact_pii
 from .llm import chat, rerank
 from .settings import RouterSettings
 
@@ -82,13 +83,21 @@ class Router:
         """列出网络中的全部 agent(含信誉)。"""
         return await self._client.list_agents()
 
+    def _outbound(self, query: str) -> str:
+        """外发副本:按策略脱敏(本地 fallback 与展示仍用原文)。"""
+        return redact_pii(query) if self._settings.redact_pii else query
+
     # ------------------------------------------------------------------
     # 路由决策(不发起任务)
     # ------------------------------------------------------------------
 
     async def route(self, query: str) -> RouteDecision:
+        if self._settings.block_secrets and (hit := find_secret(query)):
+            return RouteDecision(False, None, 0.0, f"query 含疑似密钥({hit}),按安全策略不外发")
+
+        outbound = self._outbound(query)
         try:
-            candidates = await self._client.search(query, self._settings.top_k)
+            candidates = await self._client.search(outbound, self._settings.top_k)
         except (httpx.HTTPError, RegistryError) as exc:
             return RouteDecision(False, None, 0.0, f"registry 不可用({exc})")
 
@@ -96,7 +105,7 @@ class Router:
             return RouteDecision(False, None, 0.0, "网络中没有可用 agent")
 
         try:
-            result = await rerank(query, candidates, self._settings.llm, http=self._llm_http)
+            result = await rerank(outbound, candidates, self._settings.llm, http=self._llm_http)
         except (httpx.HTTPError, ValueError, KeyError) as exc:
             return RouteDecision(False, None, 0.0, f"精排失败({exc})", candidates)
 
@@ -135,7 +144,7 @@ class Router:
 
         agent_id = decision.agent_id
         try:
-            task = await self._client.create_task(agent_id, Message.user_text(query))
+            task = await self._client.create_task(agent_id, Message.user_text(self._outbound(query)))
         except (httpx.HTTPError, RegistryError) as exc:
             return await self._fallback(query, reason=f"任务创建失败({exc})", agent_id=agent_id)
         task_id = task["id"]

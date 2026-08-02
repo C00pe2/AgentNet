@@ -23,6 +23,8 @@ class RouterSettings:
     threshold: float = 0.65  # 精排置信度低于该值则 fallback 本地
     top_k: int = 10  # 召回候选数
     request_timeout: float = 60.0
+    block_secrets: bool = True  # query 含密钥特征时永不外发
+    redact_pii: bool = False  # 外发前对 query 做 PII 脱敏
     extra: dict = field(default_factory=dict)
 
     @classmethod
@@ -40,4 +42,6 @@ class RouterSettings:
             ),
             threshold=float(env("ROUTE_THRESHOLD", "0.65")),
             top_k=int(env("RECALL_TOP_K", "10")),
+            block_secrets=env("BLOCK_SECRETS", "true").lower() not in ("0", "false", "no"),
+            redact_pii=env("REDACT_PII", "false").lower() in ("1", "true", "yes"),
         )

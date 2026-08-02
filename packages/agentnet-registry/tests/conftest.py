@@ -63,6 +63,7 @@ async def app_and_client():
         admin_key=ADMIN_KEY,
         embedding_backend="hash",
         inspect_enabled=False,
+        canary_enabled=False,
     )
     app = create_app(settings)
     async with LifespanManager(app):

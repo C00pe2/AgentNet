@@ -31,3 +31,7 @@ class Settings(BaseSettings):
     inspect_enabled: bool = True
     inspect_interval_sec: float = 60.0
     inspect_fail_threshold: int = 3
+
+    canary_enabled: bool = True
+    canary_interval_sec: float = 300.0
+    canary_timeout_sec: float = 30.0

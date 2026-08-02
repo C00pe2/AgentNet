@@ -96,6 +96,20 @@ async def search_ids(query: str, consumer_key: str) -> list[str]:
         return [c["card"]["agent_id"] for c in resp.json()["data"]["candidates"]]
 
 
+async def wait_canary_score(agent_id: str, consumer_key: str, timeout: float = 30.0) -> float:
+    deadline = asyncio.get_running_loop().time() + timeout
+    headers = {"Authorization": f"Bearer {consumer_key}"}
+    async with httpx.AsyncClient(base_url=REGISTRY_URL) as client:
+        while True:
+            resp = await client.get(f"/v1/agents/{agent_id}", headers=headers)
+            score = (resp.json()["data"].get("reputation") or {}).get("canary_score")
+            if score is not None:
+                return score
+            if asyncio.get_running_loop().time() > deadline:
+                raise TimeoutError(f"{agent_id} 的 canary 跑分未在 {timeout}s 内出现")
+            await asyncio.sleep(1)
+
+
 async def main() -> int:
     load_dotenv(ROOT / ".env")
     real_embedding = "--real-embedding" in sys.argv
@@ -112,6 +126,9 @@ async def main() -> int:
         "AGENTNET_INSPECT_ENABLED": "true",
         "AGENTNET_INSPECT_INTERVAL_SEC": "1",
         "AGENTNET_INSPECT_FAIL_THRESHOLD": "2",
+        "AGENTNET_CANARY_ENABLED": "true",
+        "AGENTNET_CANARY_INTERVAL_SEC": "2",
+        "AGENTNET_CANARY_TIMEOUT_SEC": "10",
     }
     registry_proc = subprocess.Popen(
         [sys.executable, "-m", "agentnet_registry"],
@@ -242,6 +259,11 @@ async def main() -> int:
         assert result.fallback and "应答回调" in result.reason, result
         log("无回调澄清场景:已主动取消并本地兜底")
 
+        # 出站安全:含密钥的 query 永不外发(registry 零接触,直接本地回答)
+        result = await router.ask("我的 API key 是 sk-a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6,帮我 review 代码")
+        assert result.fallback and "密钥" in result.reason, result
+        log("出站安全策略正常(含密钥 query 未外发)")
+
         # 反馈 → 信誉
         routed = await router.ask("review 一下这段 Go 代码")
         if routed.task_id:
@@ -254,6 +276,11 @@ async def main() -> int:
                 rep = resp.json()["data"]["reputation"]
                 log(f"go-reviewer 信誉:调用 {rep['calls']} 次,成功率 {rep['success_rate']:.0%},评分 {rep['rating']}")
                 assert rep["calls"] >= 1 and rep["success_rate"] == 1.0
+
+        # canary 跑分:go-reviewer 声明的用例应通过并计入信誉
+        score = await wait_canary_score("go-reviewer", consumer_key)
+        assert score == 1.0, score
+        log(f"canary 跑分正常(go-reviewer 通过率 {score:.0%})")
 
         # 巡检:translator 宕机 → offline 且退出召回;恢复 → active 且回到召回
         log("测试巡检(translator 宕机 → 恢复)...")

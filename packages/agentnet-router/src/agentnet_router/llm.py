@@ -62,6 +62,7 @@ def build_rerank_prompt(query: str, candidates: list[Candidate]) -> str:
         rep_text = (
             f"调用 {rep.calls} 次,成功率 {rep.success_rate:.0%}"
             + (f",评分 {rep.rating:.1f}" if rep.rating is not None else "")
+            + (f",canary 通过率 {rep.canary_score:.0%}" if rep.canary_score is not None else "")
             if rep
             else "新注册,无记录"
         )

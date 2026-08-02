@@ -1,4 +1,4 @@
-"""信誉聚合:从 Gateway 调用记录实时计算(不存储,保证永远一致)。"""
+"""信誉聚合:从 Gateway 调用记录与 canary 跑分实时计算(不存储,保证永远一致)。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from agentnet_core.enums import TaskState
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .db import CallLogRow
+from .db import CallLogRow, CanaryLogRow
 
 
 async def load_reputations(session: AsyncSession, agent_ids: list[str]) -> dict[str, Reputation]:
@@ -34,4 +34,19 @@ async def load_reputations(session: AsyncSession, agent_ids: list[str]) -> dict[
             avg_latency_ms=float(row.avg_latency_ms or 0.0),
             rating=float(row.rating) if row.rating is not None else None,
         )
+
+    # canary 通过率(与调用记录独立的维度;无调用记录的 agent 也有 canary 信誉)
+    canary_stmt = (
+        select(
+            CanaryLogRow.agent_id,
+            func.avg(case((CanaryLogRow.passed, 1.0), else_=0.0)).label("score"),
+        )
+        .where(CanaryLogRow.agent_id.in_(agent_ids))
+        .group_by(CanaryLogRow.agent_id)
+    )
+    for row in (await session.execute(canary_stmt)).all():
+        rep = result.get(row.agent_id)
+        if rep is None:
+            rep = result[row.agent_id] = Reputation()
+        rep.canary_score = float(row.score or 0.0)
     return result

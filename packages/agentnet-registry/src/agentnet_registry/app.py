@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import __version__
+from .canary import CanaryRunner
 from .config import Settings
 from .db import get_sessionmaker, init_db, init_engine
 from .embedding import build_embedder
@@ -54,14 +55,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         inspect_task = (
             asyncio.create_task(inspector.run()) if settings.inspect_enabled else None
         )
+        canary = CanaryRunner(sm, app.state.http, settings.canary_interval_sec, settings.canary_timeout_sec)
+        canary_task = (
+            asyncio.create_task(canary.run()) if settings.canary_enabled else None
+        )
 
         yield
 
         inspector.stop()
-        if inspect_task is not None:
-            inspect_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await inspect_task
+        canary.stop()
+        for task in (inspect_task, canary_task):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         await app.state.http.aclose()
         await engine.dispose()
 

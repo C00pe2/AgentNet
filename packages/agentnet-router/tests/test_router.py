@@ -9,7 +9,9 @@ from agentnet_router import (
     RegistryClient,
     Router,
     RouterSettings,
+    find_secret,
     parse_rerank_response,
+    redact_pii,
 )
 from agentnet_router.llm import RERANK_SYSTEM
 
@@ -60,6 +62,7 @@ def make_registry_handler(
     task_id: str = "t-1",
     posted_messages: list | None = None,
     canceled: list | None = None,
+    created_tasks: list | None = None,
 ):
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -73,6 +76,8 @@ def make_registry_handler(
             }
             return httpx.Response(200, json={"code": 0, "message": "ok", "data": data})
         if path.endswith("/tasks") and request.method == "POST":
+            if created_tasks is not None:
+                created_tasks.append(json.loads(request.content))
             data = {"id": task_id, "state": "submitted", "messages": [], "artifacts": []}
             return httpx.Response(200, json={"code": 0, "message": "ok", "data": data})
         if path.endswith("/events"):
@@ -108,12 +113,16 @@ def make_router(
     registry_handler,
     llm_handler,
     threshold: float = 0.65,
+    redact_pii: bool = False,
+    block_secrets: bool = True,
 ) -> Router:
     settings = RouterSettings(
         registry_url="http://registry.test",
         consumer_key="ck",
         llm=LLMSettings(base_url="http://llm.test/v1", api_key="k", model="m"),
         threshold=threshold,
+        redact_pii=redact_pii,
+        block_secrets=block_secrets,
     )
     client = RegistryClient(
         "http://registry.test", "ck", transport=httpx.MockTransport(registry_handler)
@@ -220,6 +229,53 @@ async def test_ask_input_required_without_callback_cancels():
     assert result.answer == "本地 LLM 答案"
     assert "未提供应答回调" in result.reason
     assert canceled == ["t-1"]  # 任务被主动取消
+
+
+async def test_ask_query_with_secret_never_leaves():
+    """含密钥的 query 按安全策略不外发:直接本地兜底,registry 一个请求都不收。"""
+    touched: list = []
+
+    def spy_handler(request: httpx.Request) -> httpx.Response:
+        touched.append(request.url.path)
+        return httpx.Response(200, json={"code": 0, "message": "ok", "data": {}})
+
+    router = make_router(spy_handler, make_llm_handler(RERANK_PICK_GO))
+    result = await router.ask("我的 key 是 sk-a1b2c3d4e5f6g7h8i9j0k1l2m3n4,帮我 review 代码")
+    assert result.fallback is True
+    assert "密钥" in result.reason and "安全策略" in result.reason
+    assert result.answer == "本地 LLM 答案"  # 本地 LLM 是用户自己配置的端点,可收原文
+    assert touched == []  # registry 零接触
+
+
+async def test_ask_redacts_pii_before_outbound():
+    """开启 redact_pii 后,外发给网络的 query 已脱敏。"""
+    created: list = []
+    router = make_router(
+        make_registry_handler(created_tasks=created),
+        make_llm_handler(RERANK_PICK_GO),
+        redact_pii=True,
+    )
+    result = await router.ask("我的邮箱是 bob@example.com 手机号 13812345678,帮我 review go 代码")
+    assert result.routed is True
+    sent = created[0]["message"]["parts"][0]["text"]
+    assert "bob@example.com" not in sent and "13812345678" not in sent
+    assert "[邮箱]" in sent and "[手机号]" in sent
+
+
+def test_find_secret_patterns():
+    assert find_secret("普通问题") is None
+    assert find_secret("sk-a1b2c3d4e5f6g7h8i9j0") == "OpenAI/兼容 API key"
+    assert find_secret("AKIAIOSFODNN7EXAMPLE") == "AWS Access Key"
+    assert "私钥" in (find_secret("-----BEGIN RSA PRIVATE KEY-----") or "")
+    assert find_secret("password: hunter2secret") == "密码赋值"
+
+
+def test_redact_pii_patterns():
+    text = redact_pii("联系 bob@example.com 或 13812345678,身份证 11010119900307123X")
+    assert "bob@example.com" not in text and "[邮箱]" in text
+    assert "13812345678" not in text and "[手机号]" in text
+    assert "11010119900307123X" not in text and "[身份证号]" in text
+    assert redact_pii("没有敏感信息") == "没有敏感信息"
 
 
 async def test_route_decision_reason_when_registry_down():

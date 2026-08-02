@@ -1,9 +1,10 @@
 """数据库:引擎、会话、ORM 模型。
 
-三张表:
-  api_keys   - API key(存 sha256,不存明文)
-  agents     - Agent Card 存储 + embedding 向量
-  call_logs  - Gateway 调用记录(信誉数据源)
+四张表:
+  api_keys     - API key(存 sha256,不存明文)
+  agents       - Agent Card 存储 + embedding 向量
+  call_logs    - Gateway 调用记录(信誉数据源)
+  canary_logs  - canary 用例跑分记录(信誉数据源)
 """
 
 from __future__ import annotations
@@ -60,6 +61,7 @@ class AgentRow(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     natural_capabilities: Mapped[str] = mapped_column(Text, default="")
     capabilities: Mapped[list] = mapped_column(JSON, default=list)
+    canary_cases: Mapped[list] = mapped_column(JSON, default=list)
     endpoint: Mapped[str] = mapped_column(String(512))
     auth_type: Mapped[str] = mapped_column(String(16), default="bearer")
     auth_token: Mapped[str | None] = mapped_column(String(256), nullable=True)
@@ -85,6 +87,18 @@ class CallLogRow(Base):
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     rating: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class CanaryLogRow(Base):
+    __tablename__ = "canary_logs"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    agent_id: Mapped[str] = mapped_column(String(64), ForeignKey("agents.agent_id"), index=True)
+    query: Mapped[str] = mapped_column(Text)
+    passed: Mapped[bool] = mapped_column(default=False)
+    detail: Mapped[str] = mapped_column(Text, default="")  # 未通过原因(缺失关键词/错误)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 # ---------------------------------------------------------------------------

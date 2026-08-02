@@ -56,6 +56,7 @@ def _mask_card(row: AgentRow) -> AgentCard:
         description=row.description,
         natural_capabilities=row.natural_capabilities,
         capabilities=row.capabilities or [],
+        canary_cases=row.canary_cases or [],
         endpoint="",
         auth=AgentAuth(type="none"),
         pricing=AgentPricing(**(row.pricing or {})),
@@ -131,6 +132,7 @@ async def register_agent(card: AgentCard, request: Request, p: Principal = Depen
         row.description = card.description
         row.natural_capabilities = card.natural_capabilities
         row.capabilities = card.capabilities
+        row.canary_cases = [c.model_dump() for c in card.canary_cases]
         row.endpoint = card.endpoint
         row.auth_type = card.auth.type
         row.auth_token = card.auth.token

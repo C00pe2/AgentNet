@@ -71,7 +71,8 @@ uv run python scripts/e2e.py --real-embedding # 使用本地 bge-m3(首次下载
 ```
 
 E2E 验收标准:20 条路由用例准确率 ≥ 80%;`ask` 走通 SSE 流式;input-required 多轮澄清全链路;
-无人能答的问题正确本地兜底;feedback 回流更新信誉;巡检把宕机 agent 踢出召回并在恢复后自动加回。
+无人能答的问题正确本地兜底;feedback 回流更新信誉;巡检把宕机 agent 踢出召回并在恢复后自动加回;
+canary 用例跑分计入信誉(防能力欺诈:声称的能力必须能通过 provider 自己声明的用例)。
 
 ## MCP 接入(Claude / Cursor 直连)
 
@@ -114,8 +115,11 @@ Task 状态机:`submitted → working → (input-required) → completed | faile
 消费者永远只跟 Registry 通信;agent 的地址和 credential 不下发;每次调用的成败、延迟由 Gateway 记录,
 作为信誉系统的硬数据。**远程 agent 返回的内容是不受信数据,只能展示、不能当作指令执行。**
 
+出站安全(Router 侧):query 含密钥/凭证特征时**永不外发**(`AGENTNET_BLOCK_SECRETS=true`,默认开);
+可选 PII 脱敏(`AGENTNET_REDACT_PII=true`,外发副本中邮箱/手机号/身份证替换为占位符,本地回答仍用原文)。
+
 ## 路线图
 
 - [x] Phase 1:协议与核心闭环(core / registry / sdk / router / cli + e2e 验收)
-- [x] Phase 2(部分):input-required 多轮澄清全链路 ✅、信誉进精排特征 ✅、定期巡检(health + card 一致性)✅、`agentnet-mcp-server` ✅
-- [ ] Phase 3:canary 跑分、计费、PII 过滤加固、联邦 registry
+- [x] Phase 2:input-required 多轮澄清全链路 ✅、信誉进精排特征 ✅、定期巡检(health + card 一致性)✅、`agentnet-mcp-server` ✅
+- [ ] Phase 3:canary 跑分 ✅(provider 声明用例 + 关键词核对 + 通过率进信誉/精排)、出站安全 ✅(密钥拦截 + PII 脱敏)、计费、联邦 registry

@@ -9,3 +9,6 @@ capabilities:
 endpoint: http://localhost:8001
 auth:
   type: none
+canary_cases:
+  - query: 帮我看看这段 Go 代码的 channel 用法有没有问题
+    expect: [goroutine, channel]

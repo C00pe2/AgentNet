@@ -135,12 +135,23 @@ class AgentPricing(BaseModel):
 
 
 class Reputation(BaseModel):
-    """信誉数据。由 Registry 根据 Gateway 调用记录维护,注册方不可自填。"""
+    """信誉数据。由 Registry 根据 Gateway 调用记录与 canary 跑分维护,注册方不可自填。"""
 
     calls: int = 0
     success_rate: float = 0.0
     avg_latency_ms: float = 0.0
     rating: float | None = None  # 消费者评分均值,0~5
+    canary_score: float | None = None  # canary 用例通过率(无 canary 数据为 None)
+
+
+class CanaryCase(BaseModel):
+    """能力验证用例:Registry 定期把 query 发给 agent,回答须包含全部 expect 关键词才算通过。
+
+    由 provider 注册时声明 —— 声称的能力必须能通过自己出的题,以此防能力欺诈。
+    """
+
+    query: str
+    expect: list[str] = Field(min_length=1)
 
 
 class AgentCard(BaseModel):
@@ -154,6 +165,7 @@ class AgentCard(BaseModel):
     endpoint: str = ""
     auth: AgentAuth = Field(default_factory=AgentAuth)
     pricing: AgentPricing = Field(default_factory=AgentPricing)
+    canary_cases: list[CanaryCase] = Field(default_factory=list)  # 能力验证用例(可选)
     version: str = "0.1.0"
     provider: str | None = None  # 注册时由 Registry 填入 provider 标识
     reputation: Reputation | None = None  # 查询时由 Registry 填入
