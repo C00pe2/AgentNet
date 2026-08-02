@@ -282,6 +282,29 @@ async def main() -> int:
         assert score == 1.0, score
         log(f"canary 跑分正常(go-reviewer 通过率 {score:.0%})")
 
+        # 计费:translator 按次收费(1 积分/次);成功才扣费
+        log("测试计费(translator 1 积分/次)...")
+        async with httpx.AsyncClient(base_url=REGISTRY_URL) as client:
+            admin = {"Authorization": f"Bearer {ADMIN_KEY}"}
+            consumer = {"Authorization": f"Bearer {consumer_key}"}
+            resp = await client.post(
+                "/v1/credits/topup", json={"name": "e2e-bob", "amount": 1.0}, headers=admin
+            )
+            assert resp.status_code == 200 and resp.json()["data"]["balance"] == 1.0, resp.text
+
+        result = await router.ask("帮我把这段中文翻译成英文")
+        assert result.routed and not result.fallback, result.reason
+        async with httpx.AsyncClient(base_url=REGISTRY_URL) as client:
+            consumer = {"Authorization": f"Bearer {consumer_key}"}
+            data = (await client.get("/v1/credits/balance", headers=consumer)).json()["data"]
+            assert data["balance"] == 0.0, data
+        log("按次扣费正常(余额 1 → 0,流水含 charge 记录)")
+
+        # 余额不足 → 402 → router 本地兜底
+        result = await router.ask("再帮我翻译一句")
+        assert result.fallback and "任务创建失败" in result.reason, result
+        log("余额不足:402 拒绝,已本地兜底")
+
         # 巡检:translator 宕机 → offline 且退出召回;恢复 → active 且回到召回
         log("测试巡检(translator 宕机 → 恢复)...")
         agent_procs["translator"].terminate()

@@ -118,8 +118,12 @@ Task 状态机:`submitted → working → (input-required) → completed | faile
 出站安全(Router 侧):query 含密钥/凭证特征时**永不外发**(`AGENTNET_BLOCK_SECRETS=true`,默认开);
 可选 PII 脱敏(`AGENTNET_REDACT_PII=true`,外发副本中邮箱/手机号/身份证替换为占位符,本地回答仍用原文)。
 
+计费(积分制,MVP):agent 在 card 里声明 `pricing: {model: per-call, price: N}` 即按次收费;
+创建任务前预检余额(不足返回 402,Router 自动本地兜底),**任务成功完成才扣费**;
+admin 充值 `POST /v1/credits/topup`,消费者自查 `GET /v1/credits/balance`(含流水)。provider 结算不在 MVP 范围内。
+
 ## 路线图
 
 - [x] Phase 1:协议与核心闭环(core / registry / sdk / router / cli + e2e 验收)
 - [x] Phase 2:input-required 多轮澄清全链路 ✅、信誉进精排特征 ✅、定期巡检(health + card 一致性)✅、`agentnet-mcp-server` ✅
-- [ ] Phase 3:canary 跑分 ✅(provider 声明用例 + 关键词核对 + 通过率进信誉/精排)、出站安全 ✅(密钥拦截 + PII 脱敏)、计费、联邦 registry
+- [ ] Phase 3:canary 跑分 ✅、出站安全 ✅(密钥拦截 + PII 脱敏)、计费 ✅(积分制按次收费)、联邦 registry

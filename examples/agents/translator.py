@@ -2,7 +2,7 @@
 
 import asyncio
 
-from agentnet_core import AgentCard
+from agentnet_core import AgentCard, AgentPricing
 from agentnet_sdk import AgentServer
 
 server = AgentServer(
@@ -12,6 +12,7 @@ server = AgentServer(
         description="中英互译,文档级翻译",
         natural_capabilities="中英文互译,技术文档翻译,markdown 格式保留,术语一致性,本地化表达",
         capabilities=["translate", "zh-en"],
+        pricing=AgentPricing(model="per-call", price=1.0),
     )
 )
 

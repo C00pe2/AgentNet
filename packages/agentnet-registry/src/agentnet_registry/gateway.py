@@ -14,7 +14,7 @@ from agentnet_core.enums import TaskState
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from .db import AgentRow, CallLogRow
+from .db import AgentRow, CallLogRow, CreditAccountRow, CreditTxRow
 
 
 class AgentHttpClient:
@@ -69,14 +69,14 @@ def map_downstream_error(exc: Exception) -> HTTPException:
     return HTTPException(502, f"无法连接 agent({exc.__class__.__name__})")
 
 
-async def insert_call_log(sm, task_id: str, agent_id: str, consumer: str) -> None:
+async def insert_call_log(sm, task_id: str, agent_id: str, consumer: str, charge: float | None = None) -> None:
     async with sm() as session:
-        session.add(CallLogRow(task_id=task_id, agent_id=agent_id, consumer=consumer))
+        session.add(CallLogRow(task_id=task_id, agent_id=agent_id, consumer=consumer, charge=charge))
         await session.commit()
 
 
 async def record_terminal(sm, task_id: str, state: TaskState, error: str | None = None) -> None:
-    """任务到达终态时记录(只记一次;由 SSE 代理或轮询代理触发)。"""
+    """任务到达终态时记录(只记一次;由 SSE 代理或轮询代理触发)。成功完成才扣费。"""
     if not state.is_terminal:
         return
     async with sm() as session:
@@ -92,4 +92,11 @@ async def record_terminal(sm, task_id: str, state: TaskState, error: str | None 
                 created = created.replace(tzinfo=UTC)
             row.latency_ms = int((now - created).total_seconds() * 1000)
         row.error = error
+        if state == TaskState.COMPLETED and row.charge:
+            acc = await session.get(CreditAccountRow, row.consumer)
+            if acc is not None:
+                acc.balance -= row.charge
+                session.add(
+                    CreditTxRow(name=row.consumer, delta=-row.charge, reason="charge", task_id=task_id)
+                )
         await session.commit()

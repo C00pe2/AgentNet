@@ -13,3 +13,8 @@ class KeyCreate(BaseModel):
 class FeedbackRequest(BaseModel):
     task_id: str
     rating: float = Field(ge=0, le=5)
+
+
+class TopupRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)  # consumer 身份(key 属主名)
+    amount: float = Field(gt=0)

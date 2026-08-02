@@ -8,3 +8,6 @@ capabilities:
 endpoint: http://localhost:8002
 auth:
   type: none
+pricing:
+  model: per-call
+  price: 1

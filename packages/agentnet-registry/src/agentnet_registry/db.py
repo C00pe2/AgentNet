@@ -1,10 +1,12 @@
 """数据库:引擎、会话、ORM 模型。
 
-四张表:
-  api_keys     - API key(存 sha256,不存明文)
-  agents       - Agent Card 存储 + embedding 向量
-  call_logs    - Gateway 调用记录(信誉数据源)
-  canary_logs  - canary 用例跑分记录(信誉数据源)
+六张表:
+  api_keys             - API key(存 sha256,不存明文)
+  agents               - Agent Card 存储 + embedding 向量
+  call_logs            - Gateway 调用记录(信誉数据源)
+  canary_logs          - canary 用例跑分记录(信誉数据源)
+  credit_accounts      - 消费者积分余额
+  credit_transactions  - 积分流水(充值/扣费)
 """
 
 from __future__ import annotations
@@ -87,6 +89,7 @@ class CallLogRow(Base):
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     rating: Mapped[float | None] = mapped_column(Float, nullable=True)
+    charge: Mapped[float | None] = mapped_column(Float, nullable=True)  # 本次调用定价快照(积分)
 
 
 class CanaryLogRow(Base):
@@ -98,6 +101,25 @@ class CanaryLogRow(Base):
     passed: Mapped[bool] = mapped_column(default=False)
     detail: Mapped[str] = mapped_column(Text, default="")  # 未通过原因(缺失关键词/错误)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class CreditAccountRow(Base):
+    __tablename__ = "credit_accounts"
+
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)  # consumer 身份(key 属主名)
+    balance: Mapped[float] = mapped_column(Float, default=0.0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class CreditTxRow(Base):
+    __tablename__ = "credit_transactions"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(64), index=True)
+    delta: Mapped[float] = mapped_column(Float)  # 正=充值,负=扣费
+    reason: Mapped[str] = mapped_column(String(16))  # topup | charge
+    task_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 

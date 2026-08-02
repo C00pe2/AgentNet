@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
-from .db import AgentRow, ApiKeyRow, CallLogRow
+from .db import AgentRow, ApiKeyRow, CallLogRow, CreditAccountRow, CreditTxRow
 from .embedding import card_embed_text
 from .gateway import (
     AgentHttpClient,
@@ -30,7 +30,7 @@ from .gateway import (
 )
 from .recall import recall_top_k
 from .reputation import load_reputations
-from .schemas import FeedbackRequest, KeyCreate
+from .schemas import FeedbackRequest, KeyCreate, TopupRequest
 from .security import (
     Principal,
     generate_key,
@@ -254,6 +254,14 @@ async def _proxy_json(request: Request, row: AgentRow, method: str, path: str, p
     return resp.json()
 
 
+def _call_price(row: AgentRow) -> float:
+    """单次调用定价(积分);free 或价格为空返回 0。"""
+    pricing = row.pricing or {}
+    if pricing.get("model") != "per-call":
+        return 0.0
+    return float(pricing.get("price") or 0.0)
+
+
 @router.post("/agents/{agent_id}/tasks")
 async def gw_create_task(
     agent_id: str, body: TaskCreate, request: Request, p: Principal = Depends(require_consumer)
@@ -262,12 +270,22 @@ async def gw_create_task(
     if row.status != AgentStatus.ACTIVE.value:
         raise HTTPException(503, "agent 当前离线")
     _governance_precheck(request, agent_id)
+    price = _call_price(row)
+    if price > 0:
+        sm = request.app.state.session_maker
+        async with sm() as session:
+            acc = await session.get(CreditAccountRow, p.name)
+            balance = acc.balance if acc else 0.0
+        if balance < price:
+            raise HTTPException(402, f"余额不足:本次调用需 {price:g} 积分,当前 {balance:g}")
     payload = await _proxy_json(
         request, row, "POST", constants.TASKS_PATH, body.model_dump(mode="json")
     )
     task_id = payload.get("id")
     if task_id:
-        await insert_call_log(request.app.state.session_maker, task_id, agent_id, p.name)
+        await insert_call_log(
+            request.app.state.session_maker, task_id, agent_id, p.name, charge=price or None
+        )
     return ok(payload)
 
 
@@ -345,8 +363,50 @@ async def gw_task_events(agent_id: str, task_id: str, request: Request, _: Princ
 
 
 # ---------------------------------------------------------------------------
-# 控制面:消费者反馈(评分进信誉)
+# 控制面:积分(admin 充值 / consumer 查余额)/ 消费者反馈(评分进信誉)
 # ---------------------------------------------------------------------------
+
+
+@router.post("/credits/topup")
+async def topup_credits(body: TopupRequest, request: Request, _: Principal = Depends(require_admin)):
+    sm = request.app.state.session_maker
+    async with sm() as session:
+        acc = await session.get(CreditAccountRow, body.name)
+        if acc is None:
+            acc = CreditAccountRow(name=body.name, balance=0.0)
+            session.add(acc)
+        acc.balance += body.amount
+        session.add(CreditTxRow(name=body.name, delta=body.amount, reason="topup"))
+        await session.commit()
+        return ok({"name": body.name, "balance": acc.balance})
+
+
+@router.get("/credits/balance")
+async def credit_balance(request: Request, p: Principal = Depends(get_principal)):
+    sm = request.app.state.session_maker
+    async with sm() as session:
+        acc = await session.get(CreditAccountRow, p.name)
+        txs = (
+            (
+                await session.execute(
+                    select(CreditTxRow)
+                    .where(CreditTxRow.name == p.name)
+                    .order_by(CreditTxRow.id.desc())
+                    .limit(10)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    return ok(
+        {
+            "name": p.name,
+            "balance": acc.balance if acc else 0.0,
+            "transactions": [
+                {"delta": t.delta, "reason": t.reason, "task_id": t.task_id} for t in txs
+            ],
+        }
+    )
 
 
 @router.post("/feedback")
