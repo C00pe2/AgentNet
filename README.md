@@ -126,6 +126,8 @@ router.ask(query):
 
 消费者永远只跟 Registry 通信;agent 的地址和 credential 不外泄;每次调用的成败、延迟由 Gateway 亲眼记录——**信誉系统从第一天就是硬数据,不靠自觉上报**。
 
+![全链路时序图](image/sequenceDiagram.png)
+
 ## 信任与安全(不能事后补)
 
 1. **Prompt injection**:远程 agent 返回的是不受信内容,本地 agent 不能把它当指令执行,响应必须标记为 untrusted data
