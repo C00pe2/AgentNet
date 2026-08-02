@@ -19,6 +19,7 @@ from .canary import CanaryRunner
 from .config import Settings
 from .db import get_sessionmaker, init_db, init_engine
 from .embedding import build_embedder
+from .federation import FederationSync
 from .governance import CircuitBreaker, RateLimiter
 from .inspector import Inspector
 from .routes import ok, router
@@ -59,12 +60,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         canary_task = (
             asyncio.create_task(canary.run()) if settings.canary_enabled else None
         )
+        federation = FederationSync(
+            sm, app.state.http, app.state.embedder, settings.peers, settings.federation_sync_interval_sec
+        )
+        federation_task = (
+            asyncio.create_task(federation.run())
+            if settings.federation_enabled and settings.peers
+            else None
+        )
 
         yield
 
         inspector.stop()
         canary.stop()
-        for task in (inspect_task, canary_task):
+        federation.stop()
+        for task in (inspect_task, canary_task, federation_task):
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

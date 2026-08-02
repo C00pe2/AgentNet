@@ -1,6 +1,6 @@
 """Registry API 路由。
 
-控制面:/v1/keys、/v1/agents(注册/查询/注销)、/v1/agents/search、/v1/feedback
+控制面:/v1/keys、/v1/agents(注册/查询/注销)、/v1/agents/search、/v1/feedback、/v1/credits
 数据面:/v1/agents/{id}/tasks...(Gateway 代理到 agent,落库调用记录)
 
 注意路由顺序:/agents/search 必须先于 /agents/{agent_id} 声明。
@@ -8,11 +8,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import AsyncIterator
 
 import httpx
-from agentnet_core import AgentCard, AgentPricing, MessageAppend, TaskCreate, constants
+from agentnet_core import AgentCard, AgentPricing, MessageAppend, Reputation, TaskCreate, constants
 from agentnet_core.enums import AgentStatus, TaskState
 from agentnet_core.models import AgentAuth
 from agentnet_core.sse import SseParser
@@ -22,6 +23,7 @@ from sqlalchemy import select
 
 from .db import AgentRow, ApiKeyRow, CallLogRow, CreditAccountRow, CreditTxRow
 from .embedding import card_embed_text
+from .federation import FEDERATED_PREFIX
 from .gateway import (
     AgentHttpClient,
     insert_call_log,
@@ -72,6 +74,15 @@ async def _get_agent_or_404(request: Request, agent_id: str) -> AgentRow:
     if row is None:
         raise HTTPException(404, f"agent {agent_id!r} 不存在")
     return row
+
+
+def _fill_reputation(card: AgentCard, row: AgentRow, reps: dict[str, Reputation]) -> None:
+    """本地调用记录优先;federated agent 无本地记录时回退到来源 registry 的信誉快照。"""
+    rep = reps.get(row.agent_id)
+    if rep is None and row.remote_reputation:
+        with contextlib.suppress(Exception):
+            rep = Reputation(**row.remote_reputation)
+    card.reputation = rep
 
 
 def _agent_client(request: Request, row: AgentRow) -> AgentHttpClient:
@@ -178,7 +189,7 @@ async def search_agents(
     candidates = []
     for row, dist in rows:
         card = _mask_card(row)
-        card.reputation = reps.get(row.agent_id)
+        _fill_reputation(card, row, reps)
         candidates.append({"score": max(0.0, 1.0 - float(dist)), "card": card.model_dump(mode="json")})
     return ok({"query": q, "candidates": candidates})
 
@@ -192,7 +203,7 @@ async def list_agents(request: Request, _: Principal = Depends(get_principal)):
     out = []
     for row in rows:
         card = _mask_card(row)
-        card.reputation = reps.get(row.agent_id)
+        _fill_reputation(card, row, reps)
         data = card.model_dump(mode="json")
         data["status"] = row.status
         out.append(data)
@@ -206,7 +217,7 @@ async def get_agent(request: Request, agent_id: str, _: Principal = Depends(get_
     async with sm() as session:
         reps = await load_reputations(session, [agent_id])
     card = _mask_card(row)
-    card.reputation = reps.get(agent_id)
+    _fill_reputation(card, row, reps)
     data = card.model_dump(mode="json")
     data["status"] = row.status
     return ok(data)
@@ -236,6 +247,17 @@ def _governance_precheck(request: Request, agent_id: str) -> None:
         raise HTTPException(503, "该 agent 处于熔断状态,请稍后再试")
 
 
+def _unwrap_peer_envelope(row: AgentRow, payload: dict) -> dict:
+    """federated 调用的下游是另一个 registry(Envelope 协议),解包并归一业务错误。"""
+    if not row.provider.startswith(FEDERATED_PREFIX):
+        return payload
+    if isinstance(payload, dict) and "code" in payload and "data" in payload:
+        if payload["code"] != 0:
+            raise HTTPException(502, f"peer registry 错误: {str(payload.get('message'))[:200]}")
+        return payload["data"]
+    return payload
+
+
 async def _proxy_json(request: Request, row: AgentRow, method: str, path: str, payload: dict | None):
     """普通 JSON 端点代理 + 熔断反馈 + 错误归一。"""
     breaker = request.app.state.breaker
@@ -251,7 +273,7 @@ async def _proxy_json(request: Request, row: AgentRow, method: str, path: str, p
     if resp.status_code >= 400:
         raise HTTPException(resp.status_code, f"agent 拒绝请求: {resp.text[:200]}")
     breaker.on_success(row.agent_id)
-    return resp.json()
+    return _unwrap_peer_envelope(row, resp.json())
 
 
 def _call_price(row: AgentRow) -> float:

@@ -12,6 +12,7 @@ from agentnet_core.enums import AgentStatus
 from sqlalchemy import select
 
 from .db import AgentRow
+from .federation import FEDERATED_PREFIX
 from .gateway import AgentHttpClient
 
 
@@ -44,8 +45,19 @@ class Inspector:
         return False
 
     async def tick(self) -> None:
+        # federated 行由来源 registry 自己治理,本地不巡检
         async with self._sm() as session:
-            agent_ids = (await session.execute(select(AgentRow.agent_id))).scalars().all()
+            agent_ids = (
+                (
+                    await session.execute(
+                        select(AgentRow.agent_id).where(
+                            AgentRow.provider.not_like(FEDERATED_PREFIX + "%")
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
 
         for agent_id in agent_ids:
             async with self._sm() as session:

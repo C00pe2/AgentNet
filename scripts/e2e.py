@@ -1,7 +1,9 @@
 """AgentNet 端到端验收脚本。
 
-起 registry(SQLite + embedding 后端可选)+ 3 个 demo agent,走通:
-签发 key → 注册 → 召回 → LLM 精排 → SSE 调用 → 信誉 → 本地兜底。
+起双 registry(主 9000 + reg2 9001,联邦同步)+ 3 个 demo agent,走通:
+签发 key → 注册 → 联邦同步 → 召回 → LLM 精排 → SSE 调用 → 澄清 → 信誉 →
+canary → 计费 → 巡检 → 本地兜底。
+sql-optimizer 注册在 reg2 上,经联邦同步进入主 registry 召回,调用走链式代理。
 
 用法:
     uv run python scripts/e2e.py                  # hash embedding(无需下载模型)
@@ -24,12 +26,15 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 REGISTRY_URL = "http://localhost:9000"
+REGISTRY2_URL = "http://localhost:9001"
 ADMIN_KEY = "e2e-admin-key"
 AGENTS = {
     "go-reviewer": 8001,
     "translator": 8002,
     "sql-optimizer": 8003,
 }
+LOCAL_AGENTS = {"go-reviewer", "translator"}  # 注册在主 registry
+FEDERATED_AGENTS = {"sql-optimizer"}  # 注册在 reg2,经联邦同步进主 registry
 
 # (query, 期望路由到的 agent_id;None 表示期望本地兜底)
 ROUTING_CASES: list[tuple[str, str | None]] = [
@@ -110,19 +115,39 @@ async def wait_canary_score(agent_id: str, consumer_key: str, timeout: float = 3
             await asyncio.sleep(1)
 
 
+def start_registry(db: Path, port: int, real_embedding: bool, extra_env: dict | None = None) -> subprocess.Popen:
+    env = {
+        **os.environ,
+        "AGENTNET_DATABASE_URL": f"sqlite+aiosqlite:///{db}",
+        "AGENTNET_PORT": str(port),
+        "AGENTNET_EMBEDDING_BACKEND": "sentence-transformers" if real_embedding else "hash",
+        "AGENTNET_ADMIN_KEY": ADMIN_KEY,
+        **(extra_env or {}),
+    }
+    return subprocess.Popen(
+        [sys.executable, "-m", "agentnet_registry"],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 async def main() -> int:
     load_dotenv(ROOT / ".env")
     real_embedding = "--real-embedding" in sys.argv
+    embedding = "sentence-transformers" if real_embedding else "hash"
 
     registry_db = ROOT / ".e2e_registry.db"
-    if registry_db.exists():
-        registry_db.unlink()
+    registry2_db = ROOT / ".e2e_registry2.db"
+    for db in (registry_db, registry2_db):
+        if db.exists():
+            db.unlink()
 
-    registry_env = {
-        **os.environ,
-        "AGENTNET_DATABASE_URL": f"sqlite+aiosqlite:///{registry_db}",
-        "AGENTNET_EMBEDDING_BACKEND": "sentence-transformers" if real_embedding else "hash",
-        "AGENTNET_ADMIN_KEY": ADMIN_KEY,
+    import json as _json
+
+    import yaml
+
+    main_governance = {
         "AGENTNET_INSPECT_ENABLED": "true",
         "AGENTNET_INSPECT_INTERVAL_SEC": "1",
         "AGENTNET_INSPECT_FAIL_THRESHOLD": "2",
@@ -130,20 +155,21 @@ async def main() -> int:
         "AGENTNET_CANARY_INTERVAL_SEC": "2",
         "AGENTNET_CANARY_TIMEOUT_SEC": "10",
     }
-    registry_proc = subprocess.Popen(
-        [sys.executable, "-m", "agentnet_registry"],
-        env=registry_env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    reg2 = start_registry(
+        registry2_db,
+        9001,
+        real_embedding,
+        {"AGENTNET_INSPECT_ENABLED": "false", "AGENTNET_CANARY_ENABLED": "false"},
     )
+    registry_proc: subprocess.Popen | None = None
     agent_procs: dict[str, subprocess.Popen] = {}
     failures: list[str] = []
 
     try:
-        log(f"启动 registry(embedding={'bge-m3' if real_embedding else 'hash'})...")
-        await wait_http(f"{REGISTRY_URL}/healthz", timeout=120.0 if real_embedding else 60.0)
+        log(f"启动 reg2(联邦对端,embedding={embedding})...")
+        await wait_http(f"{REGISTRY2_URL}/healthz", timeout=120.0 if real_embedding else 60.0)
 
-        for agent_id, port in AGENTS.items():
+        for agent_id in AGENTS:
             proc = subprocess.Popen(
                 [sys.executable, str(ROOT / "examples" / "agents" / f"{agent_id.replace('-', '_')}.py")],
                 stdout=subprocess.DEVNULL,
@@ -153,6 +179,38 @@ async def main() -> int:
         for port in AGENTS.values():
             await wait_http(f"http://localhost:{port}/health")
         log("3 个 demo agent 已启动(8001~8003)")
+
+        # reg2:签 key + 注册联邦侧 agent(sql-optimizer),并签发主 registry 的对等消费 key
+        async with httpx.AsyncClient(base_url=REGISTRY2_URL, timeout=30.0) as client2:
+            admin = {"Authorization": f"Bearer {ADMIN_KEY}"}
+            provider2_key = (
+                await client2.post("/v1/keys", json={"role": "provider", "name": "e2e-carol"}, headers=admin)
+            ).json()["data"]["key"]
+            peering_key = (
+                await client2.post("/v1/keys", json={"role": "consumer", "name": "main-registry"}, headers=admin)
+            ).json()["data"]["key"]
+            for agent_id in FEDERATED_AGENTS:
+                card = yaml.safe_load((ROOT / "examples" / "cards" / f"{agent_id}.yaml").read_text("utf-8"))
+                resp = await client2.post(
+                    "/v1/agents", json=card, headers={"Authorization": f"Bearer {provider2_key}"}
+                )
+                assert resp.status_code == 200, resp.text
+        log(f"reg2 就绪:{','.join(FEDERATED_AGENTS)} 已注册")
+
+        # 主 registry:以消费者身份对等 reg2(联邦同步)
+        peers = _json.dumps([{"url": REGISTRY2_URL, "consumer_key": peering_key, "name": "reg2"}])
+        registry_proc = start_registry(
+            registry_db,
+            9000,
+            real_embedding,
+            {
+                **main_governance,
+                "AGENTNET_PEERS": peers,
+                "AGENTNET_FEDERATION_SYNC_INTERVAL_SEC": "2",
+            },
+        )
+        log("启动主 registry(联邦 peer=reg2)...")
+        await wait_http(f"{REGISTRY_URL}/healthz", timeout=120.0 if real_embedding else 60.0)
 
         async with httpx.AsyncClient(base_url=REGISTRY_URL, timeout=30.0) as client:
             admin = {"Authorization": f"Bearer {ADMIN_KEY}"}
@@ -165,13 +223,26 @@ async def main() -> int:
             log("已签发 provider/consumer key")
 
             provider = {"Authorization": f"Bearer {provider_key}"}
-            import yaml
-
-            for agent_id in AGENTS:
+            for agent_id in LOCAL_AGENTS:
                 card = yaml.safe_load((ROOT / "examples" / "cards" / f"{agent_id}.yaml").read_text("utf-8"))
                 resp = await client.post("/v1/agents", json=card, headers=provider)
                 assert resp.status_code == 200, resp.text
-            log("3 个 agent 已注册(registry 回调 /card 验证通过)")
+            log("2 个本地 agent 已注册;sql-optimizer 等待联邦同步")
+
+        # 联邦同步:reg2 的 sql-optimizer 进入主 registry 召回
+        deadline = asyncio.get_running_loop().time() + 30
+        while True:
+            ids = await search_ids("SQL 查询优化", consumer_key)
+            if "sql-optimizer" in ids:
+                break
+            if asyncio.get_running_loop().time() > deadline:
+                raise TimeoutError("联邦同步未在 30s 内同步 sql-optimizer")
+            await asyncio.sleep(1)
+        async with httpx.AsyncClient(base_url=REGISTRY_URL) as client:
+            consumer = {"Authorization": f"Bearer {consumer_key}"}
+            data = (await client.get("/v1/agents/sql-optimizer", headers=consumer)).json()["data"]
+            assert data["provider"] == "federated:reg2", data["provider"]
+        log("联邦同步完成:sql-optimizer 进入主 registry 召回(provider=federated:reg2)")
 
         # CLI 冒烟:list
         cli_env = {**os.environ, "AGENTNET_CONSUMER_KEY": consumer_key}
@@ -330,7 +401,9 @@ async def main() -> int:
     finally:
         for proc in agent_procs.values():
             proc.terminate()
-        registry_proc.terminate()
+        if registry_proc is not None:
+            registry_proc.terminate()
+        reg2.terminate()
 
     if failures:
         log("失败项:")

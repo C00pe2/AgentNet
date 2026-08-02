@@ -1,6 +1,15 @@
 """Registry 配置(AGENTNET_ 环境变量前缀)。"""
 
+from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class PeerRegistry(BaseModel):
+    """联邦 peer registry:周期性同步其 agent 列表,调用经对方 Gateway 链式代理。"""
+
+    url: str
+    consumer_key: str  # 本 registry 在 peer 上的消费者 key
+    name: str = ""
 
 
 class Settings(BaseSettings):
@@ -35,3 +44,8 @@ class Settings(BaseSettings):
     canary_enabled: bool = True
     canary_interval_sec: float = 300.0
     canary_timeout_sec: float = 30.0
+
+    # 联邦:AGENTNET_PEERS 为 JSON 数组,如 [{"url":"http://peer:9001","consumer_key":"ck","name":"p1"}]
+    peers: list[PeerRegistry] = []
+    federation_enabled: bool = True
+    federation_sync_interval_sec: float = 60.0

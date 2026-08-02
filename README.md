@@ -122,8 +122,19 @@ Task 状态机:`submitted → working → (input-required) → completed | faile
 创建任务前预检余额(不足返回 402,Router 自动本地兜底),**任务成功完成才扣费**;
 admin 充值 `POST /v1/credits/topup`,消费者自查 `GET /v1/credits/balance`(含流水)。provider 结算不在 MVP 范围内。
 
+联邦 registry(同步式,MVP):配置 `AGENTNET_PEERS`(JSON 数组)后,周期性把 peer 的 agent 列表
+同步为本地 `federated:` 标记的行——召回(本地 embedding)/精排/Gateway/计费全部复用现有链路;
+调用经"本地 registry → peer registry → agent"链式代理,agent credential 始终由来源 registry 持有;
+本地 agent 与联邦同名时本地优先;巡检/canary 不作用于联邦行(由来源 registry 治理);
+本地无调用记录时信誉展示回退到 peer 快照;peer 不可达时保留陈旧数据、不影响主流程。
+
+```bash
+AGENTNET_PEERS='[{"url":"http://peer:9001","consumer_key":"<本 registry 在 peer 上的 consumer key>","name":"p1"}]'
+AGENTNET_FEDERATION_SYNC_INTERVAL_SEC=60
+```
+
 ## 路线图
 
 - [x] Phase 1:协议与核心闭环(core / registry / sdk / router / cli + e2e 验收)
-- [x] Phase 2:input-required 多轮澄清全链路 ✅、信誉进精排特征 ✅、定期巡检(health + card 一致性)✅、`agentnet-mcp-server` ✅
-- [ ] Phase 3:canary 跑分 ✅、出站安全 ✅(密钥拦截 + PII 脱敏)、计费 ✅(积分制按次收费)、联邦 registry
+- [x] Phase 2:input-required 多轮澄清全链路、信誉进精排特征、定期巡检(health + card 一致性)、`agentnet-mcp-server`
+- [x] Phase 3:canary 跑分、出站安全(密钥拦截 + PII 脱敏)、计费(积分制按次收费)、联邦 registry(同步式,链式代理)

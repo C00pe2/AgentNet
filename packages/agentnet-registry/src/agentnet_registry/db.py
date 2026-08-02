@@ -68,6 +68,7 @@ class AgentRow(Base):
     auth_type: Mapped[str] = mapped_column(String(16), default="bearer")
     auth_token: Mapped[str | None] = mapped_column(String(256), nullable=True)
     pricing: Mapped[dict] = mapped_column(JSON, default=dict)
+    remote_reputation: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # 联邦来源 registry 的信誉快照
     version: Mapped[str] = mapped_column(String(32), default="0.1.0")
     status: Mapped[str] = mapped_column(String(16), default="active", index=True)
     consecutive_health_failures: Mapped[int] = mapped_column(Integer, default=0)
