@@ -151,44 +151,137 @@ web/                     # React + Vite + TS 控制台:聊天 + Agents + 注册 
 
 ## 快速开始
 
-要求:Python 3.12+、[uv](https://docs.astral.sh/uv/)、Docker(仅生产模式需要 Postgres)。
+要求:Python 3.12+、[uv](https://docs.astral.sh/uv/);Node 18+ 仅 Web 路径需要;
+Docker 仅生产 Postgres 模式需要。
+
+整套流程分 6 步:**启动 Registry → 接入 Agent → 签 key + 注册 → 签 key + 提问 → 验证 → 排错**。
+每步都同时给出 **CLI 路径** 与 **Web 路径**(二者完全等价,发的是同一个 HTTP 请求)。
+
+### Step 0: 前置
 
 ```bash
 # 1. 安装依赖
 uv sync
 
 # 2. 准备配置
-cp .env.example .env   # 填入 AGENTNET_LLM_* (OpenAI 兼容端点,用于精排与本地兜底)
+cp .env.example .env
+# 编辑 .env,至少填两项:
+#   AGENTNET_ADMIN_KEY=<你自己生成的一串随机字符串>
+#   AGENTNET_LLM_* (OpenAI 兼容端点,精排 + 本地兜底需要;纯注册流程可不填)
 
-# 3. 起 Postgres(生产模式;开发/测试可用 SQLite,见下)
+# 3. 启动 Postgres(仅生产模式;开发用 SQLite,见下「开发模式补充」)
 docker compose up -d
-
-# 4. 起 Registry
-uv run agentnet registry
-
-# 5. 起 demo agent(另开终端,共 3 个)
-uv run python examples/agents/go_reviewer.py
-uv run python examples/agents/translator.py
-uv run python examples/agents/sql_optimizer.py
-
-# 6. 签发 key 并注册 agent
-export AGENTNET_ADMIN_KEY=changeme-admin-key
-uv run agentnet create-key --role provider --name alice   # 记下输出的 provider key
-uv run agentnet create-key --role consumer --name bob     # 记下 consumer key,写入 .env 的 AGENTNET_CONSUMER_KEY
-export AGENTNET_PROVIDER_KEY=<provider key>
-uv run agentnet register examples/cards/go-reviewer.yaml
-
-# 7. 提问——自动路由到 go-reviewer 并流式返回
-uv run agentnet ask "帮我看看这段 Go 代码有没有并发问题"
 ```
 
-无 Docker 的开发模式:`.env` 中设置 `AGENTNET_DATABASE_URL=sqlite+aiosqlite:///./agentnet.db`;
-无 GPU/模型下载的开发模式:`AGENTNET_EMBEDDING_BACKEND=hash`(语义粗糙,仅验证管线)。
+### Step 1: 启动 Registry
+
+```bash
+uv run agentnet registry
+# → 监听 0.0.0.0:9000
+
+# 验证
+curl http://localhost:9000/healthz
+# → {"code":0,...,"status":"up"}
+```
+
+### Step 2: 接入你的 Agent(CLI / Web 二选一)
+
+**路径 A:CLI**(起一个本地 demo agent)
+
+```bash
+# 另开终端
+uv run python examples/agents/go_reviewer.py
+# → 监听 8001,/card /health /tasks 都已就绪
+```
+
+**路径 B:Web 控制台**
+
+```bash
+# 另开终端(假设 Step 1 的 Registry 已在跑)
+cd web
+npm install      # Windows PowerShell: npm.cmd install
+npm run dev      # → http://localhost:5173
+
+# 浏览器打开 → 「设置」填 Provider / Consumer key → 「注册 Agent」页填表 → 点「注册 Agent」
+# 表单提交 = CLI 等价的 POST /v1/agents,两条路径完全等价
+```
+
+> 想自己写一个最小 agent?参见 `examples/agents/go_reviewer.py` 全文 42 行,
+> 或 [docs/PROVIDER_REGISTRATION.md](docs/PROVIDER_REGISTRATION.md)「阶段 1:启动你的 Agent 服务」一节。
+
+### Step 3: 签发 provider key + 注册 agent
+
+```bash
+# 3.1 admin 签 key(只跑一次)
+export AGENTNET_ADMIN_KEY=<你的 admin key>
+uv run agentnet create-key --role provider --name alice
+# → 输出 an_provider_xxx ← 把这串写回 .env 的 AGENTNET_PROVIDER_KEY
+
+# 3.2 注册 agent
+# 路径 A:CLI(终端写入 .env 后重开 shell,或直接 export)
+export AGENTNET_PROVIDER_KEY=<上面拿到的>
+uv run agentnet register examples/cards/go-reviewer.yaml
+# → 已注册: go-reviewer
+
+# 路径 B:Web
+# 浏览器「设置」填入 provider key → 「注册 Agent」页填表(同 CLI 的 card 字段)→ 点「注册 Agent」
+```
+
+### Step 4: 签发 consumer key + 提问
+
+```bash
+# 4.1 admin 签 consumer key(只跑一次)
+uv run agentnet create-key --role consumer --name bob
+# → 输出 an_consumer_xxx ← 把这串写回 .env 的 AGENTNET_CONSUMER_KEY
+
+# 4.2 提问
+# 路径 A:CLI(自动路由,需 .env 有 LLM 配置)
+uv run agentnet ask "帮我看看这段 Go 代码有没有并发问题"
+
+# 路径 B:Web
+# 浏览器「聊天」页直接问(自动 search → 选 top1 → SSE 流式渲染)
+```
+
+### Step 5: 验证(确认注册真的成功了)
+
+```bash
+# 网络里现在有什么
+uv run agentnet list
+# 或浏览器「Agents」页
+
+# 召回能搜到吗
+uv run agentnet search "Go 并发 bug" --top-k 3
+# → 0.812  go-reviewer (Go Reviewer)
+```
+
+60s 后,Registry 巡检第一次命中你的 agent;5 min 后 canary 第一次跑分;
+两个事件都会刷新 `agentnet list` 里的信誉字段。
+
+### Step 6: 排错速查(4 个最常见的)
+
+| 现象 | 原因 | 怎么修 |
+|---|---|---|
+| 注册 agent 时 **502** | endpoint 不可达 | `curl <endpoint>/card`,检查防火墙 / TLS / 端口 |
+| 注册 / 调用时 **401** | API key 没设或填错 | `echo $AGENTNET_PROVIDER_KEY` / `$AGENTNET_CONSUMER_KEY` |
+| 注册时 **400** "agent_id 不符" | /card 返回的 agent_id 跟 yaml 不一致 | 改 yaml 或改 agent 服务 |
+| 端口冲突 **9000/8001/5173** | 已有进程占用 | 加 `--port` 或 `kill <pid>` |
+
+完整排查 + canary / 巡检 / 联邦等高级配置见 [docs/PROVIDER_REGISTRATION.md](docs/PROVIDER_REGISTRATION.md)。
+
+---
+
+**开发模式补充**:
+
+- 无 Docker:`.env` 中设置 `AGENTNET_DATABASE_URL=sqlite+aiosqlite:///./agentnet.db`
+- 无 GPU/模型下载:`AGENTNET_EMBEDDING_BACKEND=hash`(语义粗糙,仅验证管线)
 
 ## 开发
 
+`.env` 中需填 `AGENTNET_LLM_*`(精排 + e2e 都需要 LLM);不填也能跑注册 + list + search + ask-web 流程,
+只是 Router / `ask` CLI 命令会因缺 LLM 不可用。
+
 ```bash
-uv run pytest            # 49 个单元/集成测试(SQLite + hash embedding,无需外部服务)
+uv run pytest            # 78 个单元/集成测试(SQLite + hash embedding,无需外部服务)
 uv run ruff check packages
 uv run python scripts/e2e.py                  # 端到端验收(hash embedding,需 .env 里的 LLM 配置)
 uv run python scripts/e2e.py --real-embedding # 使用本地 bge-m3(首次下载 ~2.3GB)
@@ -197,46 +290,6 @@ uv run python scripts/e2e.py --real-embedding # 使用本地 bge-m3(首次下载
 E2E 验收标准:20 条路由用例准确率 ≥ 80%;`ask` 走通 SSE 流式;input-required 多轮澄清全链路;
 无人能答的问题正确本地兜底;feedback 回流更新信誉;巡检把宕机 agent 踢出召回并在恢复后自动加回;
 canary 用例跑分计入信誉(防能力欺诈:声称的能力必须能通过 provider 自己声明的用例)。
-
-## 前端控制台(web/)
-
-浏览器交互手册见 [docs/前端控制台.md](docs/前端控制台.md)。
-
-`web/` 是一个独立的 React + Vite + TS 控制台,把**你本地的 agent** 接入网络:
-registry 启动后网络是空的,在「注册 Agent」页把本地 agent 的 endpoint 登记进来,
-它就接入了——「Agents」页能看到,「聊天」页能问它。
-
-后端没有 CORS 中间件,因此开发模式用 Vite dev proxy 把 `/v1` 和 `/healthz`
-转发到 `http://localhost:9000`,零后端改动。
-
-```bash
-# 终端 1:起 registry(空网络)+ 一个本地 agent(自带的 go_reviewer 就是个参考实现)
-uv run agentnet registry &
-uv run python examples/agents/go_reviewer.py &
-
-# 终端 2:起前端(默认 5173)
-cd web
-npm install      # 注意:Windows PowerShell 需用 npm.cmd
-npm run dev
-# 浏览器打开 http://localhost:5173,设置里填 Consumer / Provider API Key
-```
-
-前端能力:
-- **注册 Agent**:Provider key 下的 AgentCard 表单(agent_id / name / description /
-  natural_capabilities / capabilities / endpoint / auth / pricing / canary_cases);
-  registry 回调 endpoint 验证 agent 真实存在后才入库。
-- **Agents**:网络里现在有什么——列表 + 语义搜索 + 详情弹窗 + 一键"向它提问"(跳过自动路由,锁定 agent)。
-- **聊天**:提问 → 自动 search 召回 → 选 top1 → 建 task → fetch 订阅 SSE 流式渲染;
-  路由过程对用户可见(top-K 候选 + 相似度);`input-required` 时输入框切换为澄清模式;
-  完成后 0–5 星评分写回 feedback。浏览器不放 LLM key,不做精排与本地兜底。
-
-```bash
-cd web
-npm run build    # 类型检查 + 生产构建
-npm run preview  # 预览构建产物
-```
-
-> 生产部署:registry 需要挂 `CORSMiddleware`,或在 nginx 等反代后面把 `/v1` 转到 registry。
 
 ## MCP 接入(Claude / Cursor 直连)
 
