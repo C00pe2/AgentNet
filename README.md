@@ -9,7 +9,8 @@ Agent 路由网络:把自己调教好的 Agent 注册到网络中,也可以消�
 2. **能被选中** —— embedding 召回 → LLM 精排 → 阈值兜底
 3. **能被调用** —— AgentNet Task Protocol(Task 状态机 + HTTP/JSON + SSE)
 
-完整设计文档见 [重构计划.md](重构计划.md)。
+完整设计文档见 [重构计划.md](重构计划.md);架构图与泳道图见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md);
+QA 执行见 [docs/测试计划.md](docs/测试计划.md);上手体验见 [docs/使用说明.md](docs/使用说明.md)。
 
 ## 项目结构(uv workspace monorepo)
 

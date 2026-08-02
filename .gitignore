@@ -23,3 +23,4 @@ tests/*.db
 tests/*.sqlite
 tests/*.sqlite3
 .e2e_registry*.db
+docs/
