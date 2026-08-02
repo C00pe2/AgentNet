@@ -9,8 +9,130 @@ Agent 路由网络:把自己调教好的 Agent 注册到网络中,也可以消�
 2. **能被选中** —— embedding 召回 → LLM 精排 → 阈值兜底
 3. **能被调用** —— AgentNet Task Protocol(Task 状态机 + HTTP/JSON + SSE)
 
-完整设计文档见 [重构计划.md](重构计划.md);架构图与泳道图见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md);
-QA 执行见 [docs/测试计划.md](docs/测试计划.md);上手体验见 [docs/使用说明.md](docs/使用说明.md)。
+Provider 注册流程见 [docs/PROVIDER_REGISTRATION.md](docs/PROVIDER_REGISTRATION.md)。
+
+## 核心抽象
+
+### Agent Card(能力名片)——系统基石
+
+每个 Agent 注册时提交的结构化描述。路由质量的上限取决于描述质量。
+
+```yaml
+id: agent://alice/go-reviewer
+name: Go Code Reviewer
+description: 专注 Go 代码 review,擅长并发 bug 和性能问题
+capabilities: [go, code-review, concurrency]       # 结构化标签,用于过滤
+natural_capabilities: |                             # 自然语言描述,用于 embedding
+  我擅长审查 Go 代码:goroutine 泄漏、channel 死锁、pprof 性能分析...
+endpoint: https://alice.dev/agentnet
+auth: { type: bearer-token }                        # credential 存 Registry,不下发
+pricing: { model: free }
+reputation: { success_rate: 0.97, calls: 1200 }     # 由 Registry 维护,不可自填
+```
+
+### Registry(注册中心 + 网关)
+
+- 控制面:注册/鉴权/巡检、embedding 召回、信誉计算
+- 数据面:Gateway 代理所有调用,记录延迟/成功率
+- 存储:Postgres + pgvector
+
+### Router(路由器,消费侧)
+
+管线(套用推荐系统「召回 → 精排 → 兜底」结构):
+
+```
+用户提问
+  ├─ ① 路由决策:要不要外包?(策略可配:always / never / auto)
+  ├─ ② 召回:registry.search(query) → top-K candidate cards(embedding 在服务端)
+  ├─ ③ 精排:LLM 看 query + K 张 Agent Card → 选 1 个或"都不合适",给出置信度
+  ├─ ④ 调用:经 Registry Gateway 创建 Task、消费 SSE(超时/重试)
+  ├─ ⑤ 兜底:调用失败或置信度不足 → 本地 LLM 回答 / 次优候选
+  └─ ⑥ 反馈:调用结果上报(评分)→ 回流改进排序
+```
+
+不纯用一种方法的原因:
+
+- 纯 embedding 相似度:快但糙,描述写得差的 agent 永远选不中
+- 纯 LLM 路由(所有 card 塞进 prompt):准但贵、慢,agent 多了不可扩展
+- 混合:embedding 召回 top-10 → LLM 精排,成本与质量平衡;长期把成功率、评分做成特征加入精排,即成 learning-to-rank
+
+### SDK(接入层)——自定义协议的"赎罪券"
+
+自定义协议意味着接入摩擦变大,SDK 质量是命门:provider 只写业务逻辑,`@skill` 装饰一下即可上线,状态机、SSE、`/card` 全由 SDK 兜底。
+
+## 自定义协议:AgentNet Task Protocol
+
+设计原则:**只有一个核心资源 Task,所有复杂语义收进状态机,传输就是 HTTP/JSON + SSE,不做多余概念。**
+
+### 数据模型(三个)
+
+```json
+Task {
+  "id": "...",
+  "state": "submitted | working | input-required | completed | failed | canceled",
+  "messages": [{ "role": "user|agent", "parts": ["TextPart | FilePart | DataPart"] }],
+  "artifacts": [{ "name": "...", "parts": ["..."] }],
+  "error": null
+}
+```
+
+### Agent 侧端点(注册方必须实现,共 7 个)
+
+| 端点 | 作用 |
+|---|---|
+| `GET /card` | 返回 Agent Card(注册验证 + 定期巡检) |
+| `POST /tasks` | 创建任务,**立即返回** task id,不等完成 → 长任务天然支持 |
+| `GET /tasks/{id}` | 轮询状态 |
+| `GET /tasks/{id}/events` | SSE 事件流:状态变更、增量文本、新 artifact(断线可重连) |
+| `POST /tasks/{id}/messages` | 补充消息(回答 `input-required` 澄清、多轮) |
+| `POST /tasks/{id}/cancel` | 取消 |
+| `GET /health` | 心跳 |
+
+关键取舍:流式不挂住 `POST /tasks`,走独立 SSE events 端点——简单、可重连、与任务生命周期解耦。
+
+### Registry 侧端点
+
+- `POST /v1/agents` 注册(提交 card + endpoint,Registry 回调 `GET /card` 验证真伪)
+- `GET /v1/agents/search?q=...` → embedding 召回 top-K candidate cards
+- `POST /v1/agents/{id}/tasks` 等 Gateway 代理端点(转发 tasks/messages/cancel/SSE,落库调用记录)
+- `POST /v1/feedback` 调用结果上报(评分 → 信誉)
+- API Key 鉴权(provider key / consumer key 分开)
+
+### 消费侧调用流程
+
+```
+router.ask(query):
+  1. registry.search(query)        → top-10 cards(embedding 召回在服务端)
+  2. LLM 精排(看 query + 10 张卡) → 选中 1 个 / "都不合适"
+  3. POST /v1/agents/{id}/tasks    → 经 Gateway 代理,订阅 SSE → 边收边显示
+  4. 若 input-required             → 转给用户,回答经 /messages 发回
+  5. completed → 收 artifacts → 上报 feedback;失败 → fallback 本地 LLM
+```
+
+## 架构总览
+
+```
+  Provider 侧                          Registry (控制面+数据面)                Consumer 侧
+┌──────────────────┐          ┌────────────────────────────────┐         ┌──────────────────┐
+│ 你的 agent 逻辑   │          │  FastAPI                       │         │  Router          │
+│   ↓ @skill 装饰器 │          │  ├─ 注册/鉴权/巡检 (控制面)     │         │  1. search 召回   │
+│ agentnet-sdk     │←─回调验证─│  ├─ bge-m3 召回 (pgvector)     │←─search─│  2. LLM 精排      │
+│ (7个协议端点)     │          │  ├─ Gateway 代理 (数据面)       │←─tasks──│  3. 消费 SSE      │
+└───────┬──────────┘          │  │   · 存 agent credential     │  proxy  │  4. 失败→本地兜底 │
+        │ POST /tasks         │  │   · 记录延迟/成功率 → 信誉   │         └──────────────────┘
+        └────────────────────→│  └─ Postgres + pgvector       │
+                              └────────────────────────────────┘
+```
+
+消费者永远只跟 Registry 通信;agent 的地址和 credential 不外泄;每次调用的成败、延迟由 Gateway 亲眼记录——**信誉系统从第一天就是硬数据,不靠自觉上报**。
+
+## 信任与安全(不能事后补)
+
+1. **Prompt injection**:远程 agent 返回的是不受信内容,本地 agent 不能把它当指令执行,响应必须标记为 untrusted data
+2. **数据隐私**:问题发出去就回不来。需要路由策略(如"含密钥的 query 永不外发")+ 可选 PII 脱敏
+3. **能力欺诈**:注册时声称的能力可能是假的 → Registry 定期发 canary 测试任务跑分,作为信誉的一部分
+4. **协议不重复造轮子**:已评估 OpenAI-compatible / A2A / MCP,最终选择自定义极简协议,但 Task 状态机语义借鉴 A2A,保留未来兼容空间;MCP 定位为消费侧获客入口(Phase 2 做 `agentnet-mcp-server`),不是骨干协议
+
 
 ## 项目结构(uv workspace monorepo)
 
