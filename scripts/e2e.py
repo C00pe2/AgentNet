@@ -1,0 +1,219 @@
+"""AgentNet 端到端验收脚本。
+
+起 registry(SQLite + embedding 后端可选)+ 3 个 demo agent,走通:
+签发 key → 注册 → 召回 → LLM 精排 → SSE 调用 → 信誉 → 本地兜底。
+
+用法:
+    uv run python scripts/e2e.py                  # hash embedding(无需下载模型)
+    uv run python scripts/e2e.py --real-embedding # 本地 bge-m3(首次下载 ~2.3GB)
+
+需要 .env 提供 AGENTNET_LLM_BASE_URL / AGENTNET_LLM_API_KEY / AGENTNET_LLM_MODEL。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import httpx
+from dotenv import load_dotenv
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+REGISTRY_URL = "http://localhost:9000"
+ADMIN_KEY = "e2e-admin-key"
+AGENTS = {
+    "go-reviewer": 8001,
+    "translator": 8002,
+    "sql-optimizer": 8003,
+}
+
+# (query, 期望路由到的 agent_id;None 表示期望本地兜底)
+ROUTING_CASES: list[tuple[str, str | None]] = [
+    ("帮我看看这段 Go 代码有没有 goroutine 泄漏", "go-reviewer"),
+    ("这个 channel 为什么会死锁?", "go-reviewer"),
+    ("review 一下我的 Go 并发代码,有没有竞态条件", "go-reviewer"),
+    ("用 pprof 怎么做 CPU 性能分析?", "go-reviewer"),
+    ("帮我 review 一段 Go 的 HTTP handler", "go-reviewer"),
+    ("帮我把这段中文翻译成英文", "translator"),
+    ("这个技术文档帮我翻译一下,保留 markdown 格式", "translator"),
+    ("Translate this paragraph into Chinese", "translator"),
+    ("中译英:人工智能正在改变世界", "translator"),
+    ("这条 SQL 查询很慢,帮我优化", "sql-optimizer"),
+    ("这个索引该怎么建?", "sql-optimizer"),
+    ("帮我分析一下这个执行计划", "sql-optimizer"),
+    ("慢查询日志里这条 JOIN 能优化吗", "sql-optimizer"),
+    ("Python 装饰器怎么用?", None),
+    ("帮我写个快速排序", None),
+    ("今天天气怎么样", None),
+    ("1+1 等于几", None),
+    ("推荐一部好电影", None),
+    ("怎么学英语?", None),
+    ("帮我重装电脑系统", None),
+]
+
+
+def log(msg: str) -> None:
+    print(f"[e2e] {msg}", flush=True)
+
+
+async def wait_http(url: str, timeout: float = 60.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    async with httpx.AsyncClient() as client:
+        while True:
+            try:
+                resp = await client.get(url, timeout=2.0)
+                if resp.status_code == 200:
+                    return
+            except httpx.HTTPError:
+                pass
+            if asyncio.get_running_loop().time() > deadline:
+                raise TimeoutError(f"等待 {url} 超时")
+            await asyncio.sleep(0.5)
+
+
+async def main() -> int:
+    load_dotenv(ROOT / ".env")
+    real_embedding = "--real-embedding" in sys.argv
+
+    registry_db = ROOT / ".e2e_registry.db"
+    if registry_db.exists():
+        registry_db.unlink()
+
+    registry_env = {
+        **os.environ,
+        "AGENTNET_DATABASE_URL": f"sqlite+aiosqlite:///{registry_db}",
+        "AGENTNET_EMBEDDING_BACKEND": "sentence-transformers" if real_embedding else "hash",
+        "AGENTNET_ADMIN_KEY": ADMIN_KEY,
+        "AGENTNET_INSPECT_ENABLED": "false",
+    }
+    registry_proc = subprocess.Popen(
+        [sys.executable, "-m", "agentnet_registry"],
+        env=registry_env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    agent_procs: dict[str, subprocess.Popen] = {}
+    failures: list[str] = []
+
+    try:
+        log(f"启动 registry(embedding={'bge-m3' if real_embedding else 'hash'})...")
+        await wait_http(f"{REGISTRY_URL}/healthz", timeout=120.0 if real_embedding else 60.0)
+
+        for agent_id, port in AGENTS.items():
+            proc = subprocess.Popen(
+                [sys.executable, str(ROOT / "examples" / "agents" / f"{agent_id.replace('-', '_')}.py")],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            agent_procs[agent_id] = proc
+        for port in AGENTS.values():
+            await wait_http(f"http://localhost:{port}/health")
+        log("3 个 demo agent 已启动(8001~8003)")
+
+        async with httpx.AsyncClient(base_url=REGISTRY_URL, timeout=30.0) as client:
+            admin = {"Authorization": f"Bearer {ADMIN_KEY}"}
+            provider_key = (
+                await client.post("/v1/keys", json={"role": "provider", "name": "e2e-alice"}, headers=admin)
+            ).json()["data"]["key"]
+            consumer_key = (
+                await client.post("/v1/keys", json={"role": "consumer", "name": "e2e-bob"}, headers=admin)
+            ).json()["data"]["key"]
+            log("已签发 provider/consumer key")
+
+            provider = {"Authorization": f"Bearer {provider_key}"}
+            import yaml
+
+            for agent_id in AGENTS:
+                card = yaml.safe_load((ROOT / "examples" / "cards" / f"{agent_id}.yaml").read_text("utf-8"))
+                resp = await client.post("/v1/agents", json=card, headers=provider)
+                assert resp.status_code == 200, resp.text
+            log("3 个 agent 已注册(registry 回调 /card 验证通过)")
+
+        # CLI 冒烟:list
+        cli_env = {**os.environ, "AGENTNET_CONSUMER_KEY": consumer_key}
+        cli = subprocess.run(
+            [sys.executable, "-m", "agentnet_cli.main", "list"],
+            env=cli_env, capture_output=True, text=True, timeout=30,
+        )
+        assert "go-reviewer" in cli.stdout, cli.stderr
+        log("CLI `agentnet list` 正常")
+
+        # 路由准确率
+        from agentnet_router import LLMSettings, Router, RouterSettings
+
+        llm = LLMSettings(
+            base_url=os.environ["AGENTNET_LLM_BASE_URL"],
+            api_key=os.environ["AGENTNET_LLM_API_KEY"],
+            model=os.environ["AGENTNET_LLM_MODEL"],
+        )
+        router = Router(
+            RouterSettings(
+                registry_url=REGISTRY_URL,
+                consumer_key=consumer_key,
+                llm=llm,
+                threshold=0.6,
+            )
+        )
+        log(f"开始路由准确率测试({len(ROUTING_CASES)} 条)...")
+        correct = 0
+        for query, expected in ROUTING_CASES:
+            decision = await router.route(query)
+            got = decision.agent_id if decision.routed else None
+            mark = "OK " if got == expected else "MISS"
+            if got == expected:
+                correct += 1
+            else:
+                failures.append(f"{mark} {query!r}: 期望 {expected},实际 {got}({decision.reason})")
+            print(f"  [{mark}] {query}  ->  {got or '本地兜底'}", flush=True)
+        accuracy = correct / len(ROUTING_CASES)
+        log(f"路由准确率:{correct}/{len(ROUTING_CASES)} = {accuracy:.0%}")
+        if accuracy < 0.8:
+            failures.append(f"准确率 {accuracy:.0%} 低于 80%")
+
+        # 完整 ask:路由成功 + SSE 流式
+        log("测试完整 ask(SSE 流式)...")
+        deltas: list[str] = []
+        result = await router.ask("帮我看看这段 Go 代码有没有并发问题", on_delta=deltas.append)
+        assert result.routed and not result.fallback, result.reason
+        assert result.agent_id == "go-reviewer" and deltas, result
+        log(f"ask 路由成功,{len(deltas)} 个流式增量,回答 {len(result.answer)} 字")
+
+        # 完整 ask:无人能答 → 本地兜底
+        result = await router.ask("宇宙的意义是什么?")
+        assert result.fallback, "应当本地兜底"
+        log(f"ask 本地兜底正常(回答 {len(result.answer)} 字)")
+
+        # 反馈 → 信誉
+        routed = await router.ask("review 一下这段 Go 代码")
+        if routed.task_id:
+            await router.feedback(routed.task_id, 5)
+            async with httpx.AsyncClient(base_url=REGISTRY_URL) as client:
+                resp = await client.get(
+                    "/v1/agents/go-reviewer",
+                    headers={"Authorization": f"Bearer {consumer_key}"},
+                )
+                rep = resp.json()["data"]["reputation"]
+                log(f"go-reviewer 信誉:调用 {rep['calls']} 次,成功率 {rep['success_rate']:.0%},评分 {rep['rating']}")
+                assert rep["calls"] >= 1 and rep["success_rate"] == 1.0
+        await router.aclose()
+
+    finally:
+        for proc in agent_procs.values():
+            proc.terminate()
+        registry_proc.terminate()
+
+    if failures:
+        log("失败项:")
+        for f in failures:
+            print(f"  - {f}")
+        return 1
+    log("E2E 全部通过 ✓")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))

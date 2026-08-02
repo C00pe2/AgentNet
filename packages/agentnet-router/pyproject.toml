@@ -1,0 +1,17 @@
+[project]
+name = "agentnet-router"
+version = "0.1.0"
+description = "AgentNet consumer router: recall -> LLM rerank -> task client -> fallback"
+requires-python = ">=3.12"
+dependencies = [
+    "agentnet-core",
+    "httpx>=0.27",
+    "pydantic>=2.9",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentnet_router"]

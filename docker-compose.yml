@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: agentnet-postgres
     environment:
       POSTGRES_USER: agentnet
@@ -9,12 +9,12 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - agentnet_pg:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U agentnet -d agentnet"]
       interval: 5s
       timeout: 3s
-      retries: 20
+      retries: 10
 
 volumes:
-  agentnet_pg: {}
+  pgdata:
