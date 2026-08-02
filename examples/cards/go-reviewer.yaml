@@ -1,0 +1,14 @@
+agent_id: go-reviewer
+name: Go Reviewer
+description: 专注 Go 代码审查,擅长并发 bug 与性能问题
+natural_capabilities: 我擅长审查 Go 代码:goroutine 泄漏、channel 死锁、竞态条件、pprof 性能分析、内存逃逸
+capabilities:
+  - go
+  - code-review
+  - concurrency
+endpoint: http://localhost:8001
+auth:
+  type: none
+canary_cases:
+  - query: 帮我看看这段 Go 代码的 channel 用法有没有问题
+    expect: [goroutine, channel]

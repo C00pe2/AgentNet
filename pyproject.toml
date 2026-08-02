@@ -1,0 +1,54 @@
+[project]
+name = "agentnet"
+version = "0.1.0"
+description = "AgentNet - a routing network for agents (workspace root)"
+requires-python = ">=3.12"
+dependencies = [
+    "agentnet-core",
+    "agentnet-registry",
+    "agentnet-sdk",
+    "agentnet-router",
+    "agentnet-cli",
+    "agentnet-mcp-server",
+]
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+agentnet-core = { workspace = true }
+agentnet-registry = { workspace = true }
+agentnet-sdk = { workspace = true }
+agentnet-router = { workspace = true }
+agentnet-cli = { workspace = true }
+agentnet-mcp-server = { workspace = true }
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "asgi-lifespan>=2.1",
+    "aiosqlite>=0.20",
+    "ruff>=0.8",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["packages"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+# FastAPI/typer 的依赖注入惯用法就是函数调用作默认参数,声明为不可变调用以保留 B008 对其余场景的检查
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "typer.Argument", "typer.Option"]

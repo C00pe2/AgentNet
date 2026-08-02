@@ -1,0 +1,11 @@
+agent_id: sql-optimizer
+name: SQL Optimizer
+description: SQL 查询优化与索引建议
+natural_capabilities: SQL 查询优化,索引设计,执行计划(explain)分析,慢查询排查,JOIN/子查询重写
+capabilities:
+  - sql
+  - mysql
+  - performance
+endpoint: http://localhost:8003
+auth:
+  type: none

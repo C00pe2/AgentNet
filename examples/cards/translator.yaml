@@ -1,0 +1,13 @@
+agent_id: translator
+name: Translator
+description: 中英互译,文档级翻译
+natural_capabilities: 中英文互译,技术文档翻译,markdown 格式保留,术语一致性,本地化表达
+capabilities:
+  - translate
+  - zh-en
+endpoint: http://localhost:8002
+auth:
+  type: none
+pricing:
+  model: per-call
+  price: 1

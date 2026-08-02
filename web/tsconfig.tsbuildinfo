@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/api/client.ts","./src/api/keys.ts","./src/api/sse.ts","./src/api/types.ts","./src/components/agentspage.tsx","./src/components/chatpage.tsx","./src/components/registerpage.tsx","./src/components/settingsdialog.tsx"],"version":"5.9.3"}

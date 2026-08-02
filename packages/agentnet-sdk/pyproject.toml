@@ -1,0 +1,17 @@
+[project]
+name = "agentnet-sdk"
+version = "0.1.0"
+description = "AgentNet provider SDK: wrap your agent into an AgentNet Task Protocol service"
+requires-python = ">=3.12"
+dependencies = [
+    "agentnet-core",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentnet_sdk"]
